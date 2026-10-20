@@ -8,6 +8,10 @@ export const metadata: Metadata = { title: "Methodology" };
 
 const TOC = [
   { id: "scanners", label: "Automated scanners" },
+  { id: "skills", label: "Agent skill review" },
+  { id: "licences", label: "Licences & deprecation" },
+  { id: "consistency", label: "Answers vs. code" },
+  { id: "git", label: "Git repository import" },
   { id: "owasp", label: "OWASP Top 10 for LLMs" },
   { id: "frameworks", label: "Questionnaire frameworks" },
   { id: "gate", label: "Gate policy" },
@@ -23,9 +27,10 @@ const SCANNERS: { name: string; checks: string; basis: string; impact: string }[
     impact: "Blocking (critical / high)",
   },
   {
-    name: "Dependency vulnerabilities",
-    checks: "Packages from npm, PyPI, Maven, NuGet, Go and crates.io manifests and lockfiles, matched against known advisories (CVE, GHSA).",
-    basis: "OSV.dev vulnerability database · CycloneDX SBOM export",
+    name: "Dependencies & licences",
+    checks:
+      "Packages from npm, PyPI, Maven, NuGet, Go and crates.io manifests and lockfiles, matched against known advisories (CVE, GHSA); declared licences and deprecation status per version.",
+    basis: "OSV.dev vulnerability database · deps.dev (Open Source Insights) · CycloneDX SBOM export",
     impact: "Blocking when critical",
   },
   {
@@ -52,6 +57,61 @@ const SCANNERS: { name: string; checks: string; basis: string; impact: string }[
     basis: "Hadolint- and Checkov-derived rules",
     impact: "By severity",
   },
+  {
+    name: "Agent skill review",
+    checks: "Every SKILL.md folder: format and metadata, how clearly it tells an agent what to do and when, and risky instructions or scripts (see below).",
+    basis: "Agent Skills specification (agentskills.io) · skill authoring best practices",
+    impact: "Feedback; security issues by severity",
+  },
+  {
+    name: "Answers vs. code",
+    checks: "Contradictions between the questionnaire answers and what the other scanners found in the code.",
+    basis: "Cross-check of questionnaire answers and scan results",
+    impact: "By severity",
+  },
+];
+
+const SKILL_CHECKS: { title: string; intro: string; items: string[] }[] = [
+  {
+    title: "Structure",
+    intro: "Does the skill follow the Agent Skills format?",
+    items: [
+      "SKILL.md starts with YAML front matter",
+      "A valid name (max. 64 characters) that matches the folder name",
+      "A valid description (max. 1,024 characters)",
+      "Referenced files exist, are at most one level deep and use forward slashes",
+    ],
+  },
+  {
+    title: "Quality",
+    intro: "Will an agent understand when and how to use it?",
+    items: [
+      "The description is specific, in the third person, and says what the skill does and when to use it",
+      "The SKILL.md body stays under 500 lines; long reference files have a table of contents",
+      "Concrete examples or a step-by-step workflow, and no time-sensitive information",
+      "Scripts handle errors explicitly and declare their dependencies",
+    ],
+  },
+  {
+    title: "Security",
+    intro: "Could the skill or its scripts cause harm?",
+    items: [
+      "Prompt-injection or instruction-override text, and hidden or invisible Unicode characters",
+      "Data exfiltration, access to credential stores and embedded credentials",
+      "Remote code fetched at runtime, obfuscated payloads and destructive commands",
+      "Broad tool permissions (allowed-tools), disabled safety prompts and unexpected network hosts",
+    ],
+  },
+];
+
+const CONSISTENCY_EXAMPLES: { answer: string; code: string }[] = [
+  { answer: "No data is sent to an external AI provider", code: "The code calls a public AI endpoint" },
+  { answer: "Secrets live in Key Vault or managed identities", code: "Credentials were found in the code" },
+  { answer: "The AI only produces text or predictions", code: "The code can execute code or shell commands" },
+  { answer: "No pickle-based model files are shipped", code: "Pickle-based model files were found" },
+  { answer: "A prompt-injection guardrail is in place", code: "No guardrail was found in the code" },
+  { answer: "The asset is for internal use only", code: "The code opens a public share link" },
+  { answer: "Model and dataset licences were reviewed", code: "Copyleft dependencies were found" },
 ];
 
 type Cov = "code" | "questionnaire" | "both" | "manual";
@@ -149,7 +209,7 @@ export default function MethodologyPage() {
           <Section
             id="scanners"
             title="Automated scanners"
-            description="Every upload is extracted in memory and analysed by six scanners. Findings carry a severity, location, remediation and references."
+            description="Every upload or repository snapshot is extracted in memory and analysed by the scanners below. Nothing is executed. Findings carry a severity, location, remediation and references."
           >
             <TableScroll label="Scanners">
               <table className="w-full min-w-[760px] text-[13px]">
@@ -173,6 +233,121 @@ export default function MethodologyPage() {
                 </tbody>
               </table>
             </TableScroll>
+          </Section>
+
+          <Section
+            id="skills"
+            title="Agent skill review"
+            description="Agent skills are folders with a SKILL.md that teach an AI agent a task. They get a quick intake (one section) and a dedicated review with a score from 0 to 100 and concrete suggestions."
+          >
+            <div className="grid gap-px bg-line md:grid-cols-3">
+              {SKILL_CHECKS.map((g) => (
+                <div key={g.title} className="bg-white px-4 py-4 sm:px-5">
+                  <h3 className="text-[13px] font-semibold text-ink">{g.title}</h3>
+                  <p className="mt-0.5 text-xs text-subtle">{g.intro}</p>
+                  <ul className="mt-3 space-y-2">
+                    {g.items.map((it) => (
+                      <li key={it} className="flex gap-2 text-[13px] leading-5 text-muted">
+                        <CheckIcon size={14} strokeWidth={2} className="mt-[3px] shrink-0 text-brand" />
+                        {it}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+            <p className="border-t border-line px-4 py-3 text-[13px] leading-5 text-muted sm:px-5">
+              Based on the open{" "}
+              <a href="https://agentskills.io/specification" target="_blank" rel="noopener noreferrer" className="font-medium text-brand hover:text-brand-strong">
+                Agent Skills specification
+                <span className="sr-only"> (opens in a new tab)</span>
+              </a>{" "}
+              and published skill-authoring best practices. The skill&apos;s files also go through the regular scanners (secrets, dependencies, code), so a
+              leaked key in a skill script blocks it like any other asset. Structure and quality checks mainly give feedback; security problems are also
+              reported as findings and count towards the gate.
+            </p>
+          </Section>
+
+          <Section
+            id="licences"
+            title="Licences & deprecation"
+            description="Besides known vulnerabilities, every resolved package version is looked up in deps.dev (Open Source Insights, by Google)."
+          >
+            <ul className="space-y-2.5 px-4 py-4 text-[13px] leading-5 text-muted sm:px-5">
+              <li className="flex gap-2">
+                <CheckIcon size={14} strokeWidth={2} className="mt-[3px] shrink-0 text-brand" />
+                <span>
+                  <span className="font-medium text-ink-2">Declared licences</span> (SPDX identifiers) appear in the Dependencies table of the report.
+                  Copyleft licences such as GPL or AGPL are reported as a medium finding, because they can restrict commercial reuse; packages without a
+                  recognised licence are reported as a low finding (&ldquo;None found&rdquo; in the table).
+                </span>
+              </li>
+              <li className="flex gap-2">
+                <CheckIcon size={14} strokeWidth={2} className="mt-[3px] shrink-0 text-brand" />
+                <span>
+                  <span className="font-medium text-ink-2">Deprecated versions</span> that the maintainer has marked as deprecated are reported as a low
+                  finding, because they no longer receive fixes.
+                </span>
+              </li>
+              <li className="flex gap-2">
+                <CheckIcon size={14} strokeWidth={2} className="mt-[3px] shrink-0 text-brand" />
+                <span>
+                  If deps.dev cannot be reached, the scan still completes; licences are then shown as unknown (&ldquo;—&rdquo;).
+                </span>
+              </li>
+            </ul>
+          </Section>
+
+          <Section
+            id="consistency"
+            title="Answers vs. code"
+            description="The questionnaire is self-declared. This check compares the answers with what the scanners actually found, so contradictions surface before a reviewer has to spot them."
+          >
+            <TableScroll label="Examples of answers that contradict the code">
+              <table className="w-full min-w-[560px] text-[13px]">
+                <thead className="border-b border-line bg-surface-2/70">
+                  <tr>
+                    <th scope="col" className={th}>The questionnaire says</th>
+                    <th scope="col" className={th}>The code shows</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-line">
+                  {CONSISTENCY_EXAMPLES.map((x) => (
+                    <tr key={x.answer}>
+                      <td className={`${td} align-top leading-5 text-ink-2`}>{x.answer}</td>
+                      <td className={`${td} align-top leading-5 text-muted`}>{x.code}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </TableScroll>
+            <p className="border-t border-line px-4 py-3 text-[13px] leading-5 text-muted sm:px-5">
+              These are examples. Mismatches appear in the report as findings from &ldquo;Answers vs. code&rdquo;. They have no file location: fix them by
+              correcting the answer or by changing the code, then submit again.
+            </p>
+          </Section>
+
+          <Section
+            id="git"
+            title="Git repository import"
+            description="Instead of uploading a zip you can paste a link to a public repository."
+          >
+            <dl className="divide-y divide-line">
+              {[
+                { k: "Supported", v: "Public repositories on github.com (https://github.com/owner/repo) and gitlab.com (https://gitlab.com/group/project). A .git suffix is fine." },
+                { k: "Version", v: "Optionally a branch, tag or commit. Without it, the repository's default branch is used." },
+                {
+                  k: "How",
+                  v: "The server downloads a snapshot archive of that version from the host over https. Nothing is cloned, no Git hooks run, submodules are not included and no code is executed.",
+                },
+                { k: "Limits", v: "The same size limit as uploads applies. The snapshot is scanned exactly like an uploaded archive and kept with the submission." },
+              ].map((row) => (
+                <div key={row.k} className="grid gap-1 px-4 py-3 sm:grid-cols-[160px_minmax(0,1fr)] sm:gap-6 sm:px-5">
+                  <dt className="text-[13px] font-medium text-ink">{row.k}</dt>
+                  <dd className="text-[13px] leading-5 text-muted">{row.v}</dd>
+                </div>
+              ))}
+            </dl>
           </Section>
 
           <Section
@@ -215,7 +390,7 @@ export default function MethodologyPage() {
           <Section
             id="frameworks"
             title="Questionnaire frameworks"
-            description="The intake questionnaire has six sections. Answers that indicate risk produce findings that count towards the gate like scanner findings."
+            description="The intake questionnaire has six sections; agent skills only fill in the first one. Answers that indicate risk produce findings that count towards the gate like scanner findings."
           >
             <dl className="divide-y divide-line">
               {FRAMEWORKS.map((f) => (
@@ -325,7 +500,16 @@ export default function MethodologyPage() {
             <ul className="mt-2 list-disc space-y-1.5 pl-5 text-[13px] leading-5 text-amber-950/90 marker:text-amber-700">
               <li>Scanners are pattern-based re-implementations of open-source rulesets. They do not perform data-flow or taint analysis and will produce false positives and false negatives.</li>
               <li>The gate is not a replacement for full Semgrep, Trivy, Gitleaks or ModelScan runs, nor for a penetration test or an AI red-team exercise.</li>
-              <li>Questionnaire answers are self-declared by the asset owner and are only as reliable as the reviewer&apos;s verification.</li>
+              <li>
+                Questionnaire answers are self-declared by the asset owner and are only as reliable as the reviewer&apos;s verification. The answers-vs-code
+                check catches some contradictions, not all.
+              </li>
+              <li>
+                The agent skill review and the answers-vs-code check are heuristic: they look for patterns and can miss problems or flag something that is
+                fine. A skill score says how well a skill follows the format and best practices, not that it is safe.
+              </li>
+              <li>Git import supports public GitHub and GitLab repositories only. Private repositories, other hosts and submodules are not supported yet.</li>
+              <li>Licence data is the licence declared in deps.dev for each package version. It is not a legal review of the licence terms.</li>
               <li>Catalogue publication is simulated; no entry is created in Azure.</li>
               <li>Roadmap: run the real tools in an isolated, network-restricted worker (e.g. Azure Container Apps jobs) and attach their native SARIF output to the report.</li>
             </ul>

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { Card, InitialsTile, TableScroll, btn, td, th, thead } from "@/components/Card";
 import { DecisionBadge } from "@/components/DecisionBadge";
+import FlowDiagram from "@/components/FlowDiagram";
 import { ArrowRightIcon, PlusIcon, SearchIcon } from "@/components/icons";
 import { ScoreBar } from "@/components/Score";
 import { SeverityCounts } from "@/components/SeverityChip";
@@ -21,13 +22,6 @@ const TIER_CLASS: Record<AiActTier, string> = {
   limited: "text-ink-2",
   minimal: "text-muted",
 };
-
-const STEPS = [
-  { title: "Answer the intake", text: "Six short sections on data, models, architecture and governance.", time: "~10 minutes" },
-  { title: "Upload and scan", text: "Secrets, dependencies, code, AI risks, model files and infrastructure.", time: "~30 seconds" },
-  { title: "Reviewer sign-off", text: "A security reviewer checks the report and approves or asks for changes.", time: "1–2 working days" },
-  { title: "Published", text: "The asset appears in the Azure AI catalogue with its report and SBOM.", time: "Same day" },
-];
 
 type View = "all" | "review" | "blocked" | "approved" | "published";
 
@@ -112,19 +106,22 @@ export default async function OverviewPage({ searchParams }: { searchParams: Pro
       </dl>
 
       <section aria-labelledby="how-title" className="rounded-2xl border border-line bg-tint px-5 py-6 sm:px-8 sm:py-8">
-        <h2 id="how-title" className="text-xl font-bold text-ink">
-          How it works
-        </h2>
-        <ol className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {STEPS.map((s, i) => (
-            <li key={s.title} className="flex flex-col gap-2 rounded-xl border border-line bg-white p-5">
-              <span className="flex size-8 items-center justify-center rounded-lg bg-brand-soft font-display text-sm font-bold text-brand">{i + 1}</span>
-              <span className="mt-1 font-display text-[15px] font-bold text-ink">{s.title}</span>
-              <span className="text-sm leading-6 text-muted">{s.text}</span>
-              <span className="mt-auto pt-1 text-[13px] font-semibold text-brand">{s.time}</span>
-            </li>
-          ))}
-        </ol>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+          <div className="max-w-2xl">
+            <h2 id="how-title" className="text-xl font-bold text-ink">
+              How it works
+            </h2>
+            <p className="mt-1 text-sm leading-6 text-muted">
+              Choose your path, share the code and get a decision in about a minute. Nothing reaches the catalogue without a security reviewer&apos;s
+              sign-off.
+            </p>
+          </div>
+          <Link href="/methodology" className="inline-flex shrink-0 items-center gap-1 text-sm font-semibold text-brand hover:text-brand-strong">
+            What we check
+            <ArrowRightIcon size={14} />
+          </Link>
+        </div>
+        <FlowDiagram className="mt-6" />
       </section>
 
       <Card labelledBy="subs-title">
@@ -273,8 +270,8 @@ function EmptyState() {
       </svg>
       <h3 className="mt-5 text-lg font-bold text-ink">No submissions yet</h3>
       <p className="mt-2 max-w-md text-sm leading-6 text-muted">
-        Submit your first AI asset to see the scan and the gate decision. No application at hand? The upload step offers a deliberately vulnerable demo
-        application with example answers.
+        Submit your first AI asset or agent skill to see the scan and the gate decision. Nothing at hand? The upload step offers a deliberately
+        vulnerable demo application and a demo skill, with example answers.
       </p>
       <Link href="/submit" className={`${btn.hero} mt-6`}>
         Start a submission

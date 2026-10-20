@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { btn } from "@/components/Card";
-import { ChevronDownIcon, ExternalLinkIcon, SearchIcon, XIcon } from "@/components/icons";
+import { ChevronDownIcon, ExternalLinkIcon, InfoIcon, SearchIcon, XIcon } from "@/components/icons";
 import { SEV_BG, SeverityChip } from "@/components/SeverityChip";
 import { SEVERITY_LABEL, refHref } from "@/lib/format";
 import { SEVERITIES, type Finding, type ScannerId, type Severity } from "@/lib/types";
@@ -67,7 +67,7 @@ export default function FindingsExplorer({ findings, scanners }: { findings: Fin
       if (groupBy === "file") {
         const fa = a.f.file ?? "";
         const fb = b.f.file ?? "";
-        // Findings without a file (questionnaire) go last.
+        // Findings without a file (questionnaire, answers vs. code) go last.
         if (!fa !== !fb) return fa ? -1 : 1;
         if (fa !== fb) return fa.localeCompare(fb);
         if ((a.f.line ?? 0) !== (b.f.line ?? 0)) return (a.f.line ?? 0) - (b.f.line ?? 0);
@@ -270,6 +270,16 @@ export default function FindingsExplorer({ findings, scanners }: { findings: Fin
           </div>
         )}
       </div>
+
+      {scanner === "consistency" && (
+        <p className="flex gap-2 border-b border-line bg-tint px-5 py-3 text-[13px] leading-5 text-ink-2 sm:px-6 print:hidden">
+          <InfoIcon size={16} className="mt-0.5 shrink-0 text-brand" />
+          <span>
+            <span className="font-semibold">Answers vs. code</span> compares your questionnaire answers with what the scan found in the code, for example
+            &ldquo;no external AI API&rdquo; while the code calls one. Correct the answer or change the code.
+          </span>
+        </p>
+      )}
 
       <div className="flex flex-wrap items-center justify-between gap-2 px-5 py-3 text-[13px] text-subtle sm:px-6 print:hidden">
         <p aria-live="polite">

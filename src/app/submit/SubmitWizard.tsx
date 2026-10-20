@@ -15,19 +15,24 @@ import {
   UploadIcon,
   XIcon,
 } from "@/components/icons";
+import { AppIcon, GitBranchIcon, SkillIcon } from "@/components/icons-extra";
 import { StatusPill } from "@/components/StatusPill";
-import { DEMO_ANSWERS } from "@/lib/demo-answers";
+import { DEMO_ANSWERS, DEMO_SKILL_ANSWERS } from "@/lib/demo-answers";
 import { formatBytes } from "@/lib/format";
-import { ALL_QUESTIONS, SECTIONS, answerLabel, isVisible, validateAnswers, type Question, type Section } from "@/lib/questionnaire";
+import { ALL_QUESTIONS, answerLabel, isSkill, isVisible, sectionsFor, validateAnswers, type Question, type Section } from "@/lib/questionnaire";
 import type { Answers } from "@/lib/types";
 
 /* ------------------------------------------------------------------ constants */
 
+type Kind = "app" | "skill";
+type SourceMode = "file" | "git";
+
 const DRAFT_KEY = "aag.submission-draft.v1";
-const UPLOAD_STEP = SECTIONS.length;
-const STEP_TITLES = [...SECTIONS.map((s) => s.title), "Upload & scan"];
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
-const DEMO_FILE_NAME = "contoso-rag-assistant.zip";
+const DEMO: Record<Kind, { url: string; fileName: string; label: string }> = {
+  app: { url: "/api/sample", fileName: "contoso-rag-assistant.zip", label: "demo application" },
+  skill: { url: "/api/sample?kind=skill", fileName: "invoice-summariser-skill.zip", label: "demo skill" },
+};
 const ACCEPT =
   ".zip,.py,.ipynb,.js,.mjs,.cjs,.ts,.tsx,.jsx,.java,.kt,.cs,.go,.rb,.php,.rs,.json,.yaml,.yml,.toml,.tf,.bicep,.cfg,.ini,.txt,.md,.sh,.ps1";
 
@@ -40,7 +45,6 @@ const SHORT_TITLES: Record<string, string> = {
   controls: "Controls",
   governance: "Governance",
 };
-const STEP_SHORT = [...SECTIONS.map((s) => SHORT_TITLES[s.id] ?? s.title), "Upload & scan"];
 
 /** Friendly display heading per step. */
 const STEP_HEADINGS: Record<string, string> = {
@@ -51,18 +55,38 @@ const STEP_HEADINGS: Record<string, string> = {
   controls: "Which safeguards are in place?",
   governance: "How will it be used?",
 };
-const UPLOAD_HEADING = "Last step: upload your application";
-const UPLOAD_INTRO =
-  "We check the code, its dependencies and any model files. You get a clear report with what to fix, usually within a minute.";
+const SKILL_HEADING = "Tell us about your agent skill";
+const SKILL_INTRO = "Who owns this skill and what does it do? This is the only questionnaire step: the review itself comes from the skill's files.";
+
+const UPLOAD_COPY: Record<Kind, { heading: string; intro: string }> = {
+  app: {
+    heading: "Last step: share your code",
+    intro: "Upload an archive or link a public Git repository. We check the code, its dependencies and any model files, and you get a clear report with what to fix, usually within a minute.",
+  },
+  skill: {
+    heading: "Last step: add your skill",
+    intro: "Upload the skill folder as a .zip, or link a public Git repository that contains a SKILL.md. We review its structure, quality and security and tell you what to improve.",
+  },
+};
+
+const KIND_OPTIONS: { value: Kind; title: string; text: string; meta: string[] }[] = [
+  {
+    value: "app",
+    title: "AI application or model",
+    text: "LLM apps, RAG assistants, agents, ML models and SDKs. Full intake covering data, model, architecture, controls and governance.",
+    meta: ["6 sections", "About 10 minutes"],
+  },
+  {
+    value: "skill",
+    title: "Agent skill",
+    text: "A SKILL.md folder that teaches an AI agent a task. Quick intake: we review the structure, quality and security of the skill and give you feedback.",
+    meta: ["1 section", "About 2 minutes"],
+  },
+];
 
 const FORMAT_CHIPS = [".zip", ".py", ".ipynb", ".ts", ".js", ".tf"];
 
-const AFTER_SUBMIT = [
-  {
-    title: "Automated scan",
-    text: "Six scanners check secrets, dependencies, code, AI risks, model files and infrastructure.",
-    time: "Under a minute",
-  },
+const AFTER_SUBMIT_REST = [
   {
     title: "Gate decision",
     text: "Approved, needs review or blocked, with the exact reasons and how to fix them.",
@@ -79,20 +103,40 @@ const AFTER_SUBMIT = [
     time: "Same day",
   },
 ];
+const AFTER_SUBMIT_FIRST: Record<Kind, { title: string; text: string; time: string }> = {
+  app: {
+    title: "Automated scan",
+    text: "Scanners check secrets, dependencies and licences, code, AI risks, model files, infrastructure and whether the code matches your answers.",
+    time: "Under a minute",
+  },
+  skill: {
+    title: "Skill review",
+    text: "We check the structure, quality and security of your SKILL.md and its scripts, plus secrets and dependencies.",
+    time: "Under a minute",
+  },
+};
 
-const SCAN_STEPS = [
-  "Uploading",
-  "Extracting archive",
-  "Secret detection",
-  "Dependency vulnerabilities (OSV.dev)",
-  "Static analysis",
-  "AI / LLM rules",
-  "Model artefacts",
-  "Configuration & IaC",
-  "Evaluating gate",
-];
-/** Indicative time spent on each simulated step before moving on; the last step waits for the server. */
-const STEP_MS = [0, 1200, 1600, 5200, 3000, 2400, 1800, 1800];
+interface ScanStep {
+  label: string;
+  /** Indicative time spent on this simulated step before moving on; the last step waits for the server. */
+  ms: number;
+}
+
+function scanSteps(mode: SourceMode, kind: Kind): ScanStep[] {
+  const steps: ScanStep[] = [
+    { label: mode === "git" ? "Downloading repository" : "Uploading", ms: mode === "git" ? 2500 : 0 },
+    { label: mode === "git" ? "Extracting snapshot" : "Extracting archive", ms: 1200 },
+    { label: "Secret detection", ms: 1600 },
+    { label: "Dependencies & licences (OSV.dev, deps.dev)", ms: 5200 },
+    { label: "Static analysis", ms: 3000 },
+    { label: "AI / LLM rules", ms: 2400 },
+    { label: "Model artefacts", ms: 1800 },
+    { label: "Configuration & IaC", ms: 1800 },
+  ];
+  steps.push(kind === "skill" ? { label: "Agent skill review", ms: 1800 } : { label: "Answers vs. code", ms: 1500 });
+  steps.push({ label: "Evaluating gate", ms: 0 });
+  return steps;
+}
 
 /** Large secondary button that pairs with btn.hero on single-task screens. */
 const bigSecondary =
@@ -158,9 +202,63 @@ async function requestUploadTarget(file: File): Promise<UploadInfo> {
   throw new ApiError("Unexpected response from the upload service.");
 }
 
+/* ------------------------------------------------------------------ Git helpers */
+
+const GIT_SEGMENT = /^[A-Za-z0-9._-]{1,100}$/;
+const GIT_REF = /^[A-Za-z0-9._\/-]{1,200}$/;
+const GIT_EXAMPLE = "for example https://github.com/owner/repository or https://gitlab.com/group/project";
+
+interface RepoInput {
+  /** Normalised repository URL (or the trimmed input when it cannot be parsed). */
+  url: string;
+  /** Ref from the input field, or taken from a /tree/<ref> link. */
+  ref: string;
+  urlError: string | null;
+  refError: string | null;
+}
+
+/** Client-side mirror of the server's parser: public github.com / gitlab.com over https only. */
+function parseRepoInput(rawUrl: string, rawRef: string): RepoInput {
+  const input = rawUrl.trim();
+  let ref = rawRef.trim();
+  const fail = (urlError: string): RepoInput => ({ url: input, ref, urlError, refError: null });
+  if (!input) return fail("Enter the link to a public GitHub or GitLab repository.");
+  let u: URL;
+  try {
+    u = new URL(input);
+  } catch {
+    return fail(`Enter a complete link, ${GIT_EXAMPLE}.`);
+  }
+  if (u.protocol !== "https:" || u.username || u.password || u.port) return fail("Use an https link to github.com or gitlab.com.");
+  const host = u.hostname.toLowerCase().replace(/^www\./, "");
+  const parts = u.pathname.split("/").filter(Boolean);
+  let url: string;
+  if (host === "github.com") {
+    if (parts.length < 2) return fail(`Use the repository's own link, ${GIT_EXAMPLE}.`);
+    const owner = parts[0];
+    const repo = parts[1].replace(/\.git$/i, "");
+    if (!ref && parts[2] === "tree" && parts.length > 3) ref = parts.slice(3).join("/");
+    if (!GIT_SEGMENT.test(owner) || !GIT_SEGMENT.test(repo)) return fail("The repository link contains unsupported characters.");
+    url = `https://github.com/${owner}/${repo}`;
+  } else if (host === "gitlab.com") {
+    const dash = parts.indexOf("-");
+    const segs = (dash >= 0 ? parts.slice(0, dash) : parts).map((s, i, all) => (i === all.length - 1 ? s.replace(/\.git$/i, "") : s));
+    if (!ref && dash >= 0 && parts[dash + 1] === "tree" && parts.length > dash + 2) ref = parts.slice(dash + 2).join("/");
+    if (segs.length < 2 || !segs.every((s) => GIT_SEGMENT.test(s))) return fail(`Use the project's own link, ${GIT_EXAMPLE}.`);
+    url = `https://gitlab.com/${segs.join("/")}`;
+  } else {
+    return fail("Only public repositories on github.com or gitlab.com are supported.");
+  }
+  const refError = ref && (!GIT_REF.test(ref) || ref.includes("..")) ? "Use a branch, tag or commit hash without spaces or special characters." : null;
+  return { url, ref, urlError: null, refError };
+}
+
 /* ------------------------------------------------------------------ answer helpers */
 
 const hasValue = (v: string | string[] | undefined) => (Array.isArray(v) ? v.length > 0 : typeof v === "string" && v.trim() !== "");
+
+/** True when the user typed or picked anything besides the asset type chosen on the first screen. */
+const hasOwnAnswers = (a: Answers) => Object.keys(a).some((k) => k !== "asset_type" && hasValue(a[k]));
 
 /** Only answers of visible questions are submitted. */
 function visibleAnswers(a: Answers): Answers {
@@ -196,22 +294,48 @@ function cloneAnswers(a: Answers): Answers {
   return out;
 }
 
+/** The asset_type question without the "skill" option (skills have their own path). */
+function withoutSkillOption(q: Question): Question {
+  return { ...q, options: q.options?.filter((o) => o.value !== "skill") };
+}
+
+function sectionTitle(s: Section, kind: Kind): string {
+  return kind === "skill" && s.id === "asset" ? "Skill & ownership" : s.title;
+}
+
 type StepState = "complete" | "attention" | "started" | "todo";
 
 /* ------------------------------------------------------------------ component */
 
 type Phase = "idle" | "uploading" | "scanning" | "redirecting";
-type FocusTarget = { kind: "heading" } | { kind: "field"; id: string } | { kind: "element"; id: string };
+type FocusTarget = { kind: "heading" } | { kind: "field"; id: string } | { kind: "element"; id: string } | { kind: "input"; id: string };
 type Probe = { status: "idle" } | { status: "checking" } | { status: "ok"; info: UploadInfo } | { status: "error"; message: string };
+interface Run {
+  mode: SourceMode;
+  kind: Kind;
+  /** File name or repository link shown on the progress screen. */
+  name: string;
+  /** File size or ref shown next to it. */
+  detail: string;
+}
 
 export default function SubmitWizard() {
   const router = useRouter();
   const [answers, setAnswers] = useState<Answers>({});
   const [step, setStep] = useState(0);
+  const [chosen, setChosen] = useState(false);
+  const [pick, setPick] = useState<Kind | null>(null);
+  const [pickError, setPickError] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [attempted, setAttempted] = useState<Record<string, boolean>>({});
   const [hydrated, setHydrated] = useState(false);
   const [restored, setRestored] = useState(false);
+
+  const [source, setSource] = useState<SourceMode>("file");
+  const [gitUrl, setGitUrl] = useState("");
+  const [gitRef, setGitRef] = useState("");
+  const [gitError, setGitError] = useState<string | null>(null);
+  const [gitRefError, setGitRefError] = useState<string | null>(null);
 
   const [file, setFile] = useState<File | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
@@ -222,6 +346,7 @@ export default function SubmitWizard() {
   const [confirmError, setConfirmError] = useState(false);
 
   const [phase, setPhase] = useState<Phase>("idle");
+  const [run, setRun] = useState<Run | null>(null);
   const [simStep, setSimStep] = useState(0);
   const [startedAt, setStartedAt] = useState(0);
   const [nowTick, setNowTick] = useState(0);
@@ -240,13 +365,19 @@ export default function SubmitWizard() {
       if (raw) {
         const d: unknown = JSON.parse(raw);
         if (d && typeof d === "object") {
-          const draft = d as { answers?: unknown; step?: unknown };
+          const draft = d as { answers?: unknown; step?: unknown; chosen?: unknown; source?: unknown; gitUrl?: unknown; gitRef?: unknown };
           const restoredAnswers = sanitizeDraft(draft.answers);
-          if (Object.keys(restoredAnswers).length) {
+          const any = Object.keys(restoredAnswers).length > 0;
+          if (any) {
             setAnswers(restoredAnswers);
             setRestored(true);
           }
-          if (typeof draft.step === "number" && draft.step >= 0 && draft.step <= UPLOAD_STEP) setStep(Math.floor(draft.step));
+          if (draft.chosen === true || any) setChosen(true);
+          const maxStep = sectionsFor(restoredAnswers).length;
+          if (typeof draft.step === "number" && draft.step >= 0 && draft.step <= maxStep) setStep(Math.floor(draft.step));
+          if (draft.source === "file" || draft.source === "git") setSource(draft.source);
+          if (typeof draft.gitUrl === "string") setGitUrl(draft.gitUrl.slice(0, 500));
+          if (typeof draft.gitRef === "string") setGitRef(draft.gitRef.slice(0, 200));
         }
       }
     } catch {
@@ -258,31 +389,33 @@ export default function SubmitWizard() {
   useEffect(() => {
     if (!hydrated) return;
     try {
-      window.localStorage.setItem(DRAFT_KEY, JSON.stringify({ answers, step }));
+      window.localStorage.setItem(DRAFT_KEY, JSON.stringify({ answers, step, chosen, source, gitUrl, gitRef }));
     } catch {
       /* ignore quota / privacy mode */
     }
-  }, [answers, step, hydrated]);
+  }, [answers, step, chosen, source, gitUrl, gitRef, hydrated]);
 
   /* simulated scan progress ---------------------------------------- */
   useEffect(() => {
-    if (phase !== "scanning") return;
-    let i = 1;
+    if (phase !== "scanning" || !run) return;
+    const steps = scanSteps(run.mode, run.kind);
+    // File uploads already finished step 0 ("Uploading"); a Git download happens server-side, so it starts at step 0.
+    let i = run.mode === "git" ? 0 : 1;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    setSimStep(1);
+    setSimStep(i);
     const next = () => {
-      if (i >= SCAN_STEPS.length - 1) return;
+      if (i >= steps.length - 1) return;
       timer = setTimeout(() => {
         i += 1;
         setSimStep(i);
         next();
-      }, STEP_MS[i] ?? 2000);
+      }, steps[i]?.ms ?? 2000);
     };
     next();
     return () => {
       if (timer) clearTimeout(timer);
     };
-  }, [phase]);
+  }, [phase, run]);
 
   useEffect(() => {
     if (phase === "idle") return;
@@ -310,11 +443,17 @@ export default function SubmitWizard() {
       }
     } else if (focusTarget.kind === "element") {
       document.getElementById(focusTarget.id)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    } else if (focusTarget.kind === "input") {
+      const el = document.getElementById(focusTarget.id);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.focus({ preventScroll: true });
+      }
     } else {
       const el = document.getElementById(`field-${focusTarget.id}`);
       if (el) {
         el.scrollIntoView({ behavior: "smooth", block: "center" });
-        const input = el.querySelector<HTMLElement>("input:checked, input, textarea");
+        const input = el.querySelector<HTMLElement>("input:checked, input, textarea, button");
         input?.focus({ preventScroll: true });
       }
     }
@@ -322,18 +461,28 @@ export default function SubmitWizard() {
   }, [focusTarget]);
 
   /* derived state ---------------------------------------------------- */
-  const sectionErrors = useMemo(() => SECTIONS.map((s) => validateAnswers(answers, s.id)), [answers]);
+  const kind: Kind = isSkill(answers) ? "skill" : "app";
+  const sections = useMemo(() => sectionsFor(answers), [answers]);
+  const uploadStep = sections.length;
+  const currentStep = Math.min(step, uploadStep);
+  const stepTitles = useMemo(() => [...sections.map((s) => sectionTitle(s, kind)), "Upload & scan"], [sections, kind]);
+  const stepShort = useMemo(
+    () => [...sections.map((s) => (kind === "skill" && s.id === "asset" ? "Skill & owner" : (SHORT_TITLES[s.id] ?? s.title))), "Upload & scan"],
+    [sections, kind],
+  );
+
+  const sectionErrors = useMemo(() => sections.map((s) => validateAnswers(answers, s.id)), [sections, answers]);
   const stepStates: StepState[] = useMemo(
     () =>
-      SECTIONS.map((s, i): StepState => {
-        const valid = Object.keys(sectionErrors[i]).length === 0;
+      sections.map((s, i): StepState => {
+        const valid = Object.keys(sectionErrors[i] ?? {}).length === 0;
         if (valid) return "complete";
         if (attempted[s.id]) return "attention";
-        return s.questions.some((q) => hasValue(answers[q.id])) ? "started" : "todo";
+        return s.questions.some((q) => q.id !== "asset_type" && hasValue(answers[q.id])) ? "started" : "todo";
       }),
-    [sectionErrors, attempted, answers],
+    [sections, sectionErrors, attempted, answers],
   );
-  const incomplete = SECTIONS.filter((_, i) => stepStates[i] !== "complete");
+  const incomplete = sections.filter((_, i) => stepStates[i] !== "complete");
   const allValid = incomplete.length === 0;
 
   /* navigation ------------------------------------------------------- */
@@ -348,7 +497,8 @@ export default function SubmitWizard() {
   }
 
   function continueFrom(i: number) {
-    const section = SECTIONS[i];
+    const section = sections[i];
+    if (!section) return;
     const errs = validateAnswers(answers, section.id);
     if (Object.keys(errs).length) {
       setErrors((prev) => ({ ...prev, ...errs }));
@@ -361,17 +511,42 @@ export default function SubmitWizard() {
 
   /** Shows validation errors (client or server) and jumps to the first affected section. */
   function showErrors(errs: Record<string, string>) {
-    const idx = SECTIONS.findIndex((s) => s.questions.some((q) => errs[q.id]));
+    const idx = sections.findIndex((s) => s.questions.some((q) => errs[q.id]));
     if (idx < 0) return false;
     setErrors((prev) => ({ ...prev, ...errs }));
     setAttempted((prev) => {
       const next = { ...prev };
-      for (const s of SECTIONS) if (s.questions.some((q) => errs[q.id])) next[s.id] = true;
+      for (const s of sections) if (s.questions.some((q) => errs[q.id])) next[s.id] = true;
       return next;
     });
     setStep(idx);
-    focusFirstError(SECTIONS[idx], errs);
+    focusFirstError(sections[idx], errs);
     return true;
+  }
+
+  /* kind ------------------------------------------------------------- */
+  function openChooser() {
+    setPick(kind);
+    setPickError(false);
+    setChosen(false);
+    setFocusTarget({ kind: "heading" });
+  }
+
+  function chooseKind(k: Kind) {
+    if (k !== kind) {
+      setErrors({});
+      setAttempted({});
+      setStep(0);
+    }
+    setAnswers((prev) => {
+      const next = { ...prev };
+      if (k === "skill") next.asset_type = "skill";
+      else if (next.asset_type === "skill") delete next.asset_type;
+      return next;
+    });
+    setChosen(true);
+    setPickError(false);
+    setFocusTarget({ kind: "heading" });
   }
 
   /* answers ---------------------------------------------------------- */
@@ -386,29 +561,65 @@ export default function SubmitWizard() {
   }
 
   function fillExample() {
-    if (Object.keys(answers).some((k) => hasValue(answers[k])) && !window.confirm("Replace the current answers with the example answers for the demo application?")) return;
-    setAnswers(cloneAnswers(DEMO_ANSWERS));
+    const label = DEMO[kind].label;
+    if (hasOwnAnswers(answers) && !window.confirm(`Replace the current answers with the example answers for the ${label}?`)) return;
+    setAnswers(cloneAnswers(kind === "skill" ? DEMO_SKILL_ANSWERS : DEMO_ANSWERS));
     setErrors({});
     setAttempted({});
   }
 
   function clearForm() {
-    if (!window.confirm("Clear all answers and the selected file? This cannot be undone.")) return;
+    if (!window.confirm("Clear all answers and the selected file or repository? This cannot be undone.")) return;
     setAnswers({});
     setErrors({});
     setAttempted({});
     setFile(null);
     setFileError(null);
     setProbe({ status: "idle" });
+    setSource("file");
+    setGitUrl("");
+    setGitRef("");
+    setGitError(null);
+    setGitRefError(null);
     setConfirmed(false);
     setSubmitError(null);
     setRestored(false);
+    setChosen(false);
+    setPick(null);
+    setPickError(false);
     try {
       window.localStorage.removeItem(DRAFT_KEY);
     } catch {
       /* ignore */
     }
     goTo(0);
+  }
+
+  /* source ----------------------------------------------------------- */
+  function changeSource(m: SourceMode) {
+    setSource(m);
+    setSubmitError(null);
+  }
+
+  function onGitUrlChange(v: string) {
+    setGitUrl(v);
+    if (gitError) setGitError(null);
+  }
+
+  function onGitRefChange(v: string) {
+    setGitRef(v);
+    if (gitRefError) setGitRefError(null);
+  }
+
+  /** On blur: normalise the link (e.g. a /tree/<branch> link fills the ref field) and show errors early. */
+  function onGitUrlBlur() {
+    if (!gitUrl.trim()) return;
+    const r = parseRepoInput(gitUrl, gitRef);
+    if (!r.urlError) {
+      if (r.url !== gitUrl) setGitUrl(r.url);
+      if (r.ref !== gitRef.trim()) setGitRef(r.ref);
+    }
+    setGitError(r.urlError);
   }
 
   /* file ------------------------------------------------------------- */
@@ -443,16 +654,18 @@ export default function SubmitWizard() {
     void probeUpload(f);
   }
 
-  async function loadDemoApp() {
+  async function loadDemo() {
+    const demo = DEMO[kind];
+    setSource("file");
     setDemoLoading(true);
     setFileError(null);
     try {
-      const res = await fetch("/api/sample");
+      const res = await fetch(demo.url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const blob = await res.blob();
-      selectFile(new File([blob], DEMO_FILE_NAME, { type: "application/zip" }));
+      selectFile(new File([blob], demo.fileName, { type: "application/zip" }));
     } catch {
-      setFileError("The demo application could not be downloaded. Please try again.");
+      setFileError(`The ${demo.label} could not be downloaded. Please try again.`);
     } finally {
       setDemoLoading(false);
     }
@@ -473,11 +686,30 @@ export default function SubmitWizard() {
       showErrors(allErrors);
       return;
     }
-    if (!file) {
-      setFileError("Select a file to scan.");
-      return;
+
+    let target: { mode: "file"; file: File } | { mode: "git"; url: string; ref: string };
+    if (source === "file") {
+      if (!file) {
+        setFileError("Select a file to scan.");
+        return;
+      }
+      if (fileError || probe.status === "error") return;
+      target = { mode: "file", file };
+    } else {
+      const r = parseRepoInput(gitUrl, gitRef);
+      if (!r.urlError) {
+        if (r.url !== gitUrl) setGitUrl(r.url);
+        if (r.ref !== gitRef) setGitRef(r.ref);
+      }
+      setGitError(r.urlError);
+      setGitRefError(r.refError);
+      if (r.urlError || r.refError) {
+        setFocusTarget({ kind: "input", id: r.urlError ? "git-url" : "git-ref" });
+        return;
+      }
+      target = { mode: "git", url: r.url, ref: r.ref };
     }
-    if (fileError || probe.status === "error") return;
+
     if (!confirmed) {
       setConfirmError(true);
       return;
@@ -485,38 +717,53 @@ export default function SubmitWizard() {
 
     const clean = visibleAnswers(answers);
     submittedName.current = String(clean.asset_name ?? "asset");
+    setRun(
+      target.mode === "file"
+        ? { mode: "file", kind, name: target.file.name, detail: formatBytes(target.file.size) }
+        : { mode: "git", kind, name: target.url.replace(/^https:\/\//, ""), detail: target.ref || "default branch" },
+    );
     setStartedAt(Date.now());
     setSimStep(0);
-    setPhase("uploading");
     window.scrollTo({ top: 0, behavior: "smooth" });
 
     try {
-      const target = await requestUploadTarget(file);
       let res: Response;
-      if (target.mode === "storage") {
-        const { createClient } = await import("@supabase/supabase-js");
-        const supabase = createClient(target.supabaseUrl, target.publishableKey, {
-          auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-        });
-        const { error } = await supabase.storage
-          .from(target.bucket)
-          .uploadToSignedUrl(target.path, target.token, file, { contentType: file.type || "application/octet-stream" });
-        if (error) throw new ApiError(`The upload failed: ${error.message}`);
+      if (target.mode === "git") {
         setPhase("scanning");
         res = await fetch("/api/submissions", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ answers: clean, upload: { path: target.path, fileName: file.name, size: file.size } }),
+          body: JSON.stringify({ answers: clean, source: { type: "git", url: target.url, ...(target.ref ? { ref: target.ref } : {}) } }),
         });
       } else {
-        if (file.size > target.maxBytes) {
-          throw new ApiError(`This environment accepts files up to ${formatBytes(target.maxBytes)}. Upload a smaller archive.`);
+        const f = target.file;
+        setPhase("uploading");
+        const upload = await requestUploadTarget(f);
+        if (upload.mode === "storage") {
+          const { createClient } = await import("@supabase/supabase-js");
+          const supabase = createClient(upload.supabaseUrl, upload.publishableKey, {
+            auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+          });
+          const { error } = await supabase.storage
+            .from(upload.bucket)
+            .uploadToSignedUrl(upload.path, upload.token, f, { contentType: f.type || "application/octet-stream" });
+          if (error) throw new ApiError(`The upload failed: ${error.message}`);
+          setPhase("scanning");
+          res = await fetch("/api/submissions", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ answers: clean, upload: { path: upload.path, fileName: f.name, size: f.size } }),
+          });
+        } else {
+          if (f.size > upload.maxBytes) {
+            throw new ApiError(`This environment accepts files up to ${formatBytes(upload.maxBytes)}. Upload a smaller archive.`);
+          }
+          const form = new FormData();
+          form.append("answers", JSON.stringify(clean));
+          form.append("file", f, f.name);
+          setPhase("scanning");
+          res = await fetch("/api/submissions", { method: "POST", body: form });
         }
-        const form = new FormData();
-        form.append("answers", JSON.stringify(clean));
-        form.append("file", file, file.name);
-        setPhase("scanning");
-        res = await fetch("/api/submissions", { method: "POST", body: form });
       }
 
       const data = await readBody(res);
@@ -535,7 +782,15 @@ export default function SubmitWizard() {
       setPhase("idle");
       const message = e instanceof ApiError ? e.message : "The server could not be reached. Check your connection and try again.";
       setSubmitError(message);
-      const jumped = e instanceof ApiError && e.fields ? showErrors(e.fields) : false;
+      const fields = e instanceof ApiError ? e.fields : undefined;
+      // Repository problems are shown next to the inputs as well.
+      if (fields && (fields.gitUrl || fields.gitRef)) {
+        if (fields.gitUrl) setGitError(message);
+        if (fields.gitRef) setGitRefError(message);
+        setFocusTarget({ kind: "input", id: fields.gitUrl ? "git-url" : "git-ref" });
+        return;
+      }
+      const jumped = fields ? showErrors(fields) : false;
       if (!jumped) setFocusTarget({ kind: "element", id: "submit-error" });
     }
   }
@@ -545,7 +800,7 @@ export default function SubmitWizard() {
     return (
       <ScanProgress
         assetName={submittedName.current}
-        file={file}
+        run={run}
         phase={phase}
         simStep={simStep}
         elapsedMs={Math.max(0, nowTick - startedAt)}
@@ -553,17 +808,53 @@ export default function SubmitWizard() {
     );
   }
 
-  const section = step < UPLOAD_STEP ? SECTIONS[step] : null;
-  const heading = section ? STEP_HEADINGS[section.id] ?? section.title : UPLOAD_HEADING;
-  const intro = section ? section.intro : UPLOAD_INTRO;
-  const submitDisabled = !file || !!fileError || probe.status === "error" || probe.status === "checking";
+  // Avoid flashing the first screen before a stored draft has been read.
+  if (!hydrated) return <div className="min-h-[60vh]" aria-busy="true" />;
+
+  if (!chosen) {
+    return (
+      <KindChooser
+        headingRef={headingRef}
+        pick={pick}
+        error={pickError}
+        canClear={hasOwnAnswers(answers)}
+        onPick={(k) => {
+          setPick(k);
+          setPickError(false);
+        }}
+        onContinue={() => {
+          if (!pick) {
+            setPickError(true);
+            return;
+          }
+          chooseKind(pick);
+        }}
+        onClear={clearForm}
+      />
+    );
+  }
+
+  const section = currentStep < uploadStep ? sections[currentStep] : null;
+  const heading = section ? (kind === "skill" && section.id === "asset" ? SKILL_HEADING : (STEP_HEADINGS[section.id] ?? section.title)) : UPLOAD_COPY[kind].heading;
+  const intro = section ? (kind === "skill" && section.id === "asset" ? SKILL_INTRO : section.intro) : UPLOAD_COPY[kind].intro;
+  const submitDisabled =
+    source === "file" ? !file || !!fileError || probe.status === "error" || probe.status === "checking" : !gitUrl.trim() || !!gitError || !!gitRefError;
 
   return (
     <div className="mx-auto max-w-[1136px]">
       <div className="mx-auto max-w-[860px]">
         {/* Utility row */}
         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
-          <p className="text-sm font-semibold text-ink-2">New submission</p>
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1">
+            <p className="text-sm font-semibold text-ink-2">New submission</p>
+            <span className="inline-flex h-6 items-center gap-1.5 rounded-full bg-white px-2.5 text-xs font-medium text-ink-2 ring-1 ring-inset ring-line">
+              {kind === "skill" ? <SkillIcon size={13} className="text-brand" /> : <AppIcon size={13} className="text-brand" />}
+              {kind === "skill" ? "Agent skill" : "AI application or model"}
+            </span>
+            <button type="button" onClick={openChooser} className="text-[13px] font-semibold text-brand hover:text-brand-strong hover:underline">
+              Change
+            </button>
+          </div>
           <div className="-mr-3 flex items-center gap-1">
             <button type="button" onClick={fillExample} className={btn.ghost}>
               Fill with example answers
@@ -575,7 +866,7 @@ export default function SubmitWizard() {
           </div>
         </div>
 
-        <StepProgress step={step} states={stepStates} onSelect={goTo} />
+        <StepProgress step={currentStep} titles={stepTitles} short={stepShort} states={stepStates} onSelect={goTo} />
 
         {/* Step heading */}
         <div className="mt-10 text-center sm:mt-12">
@@ -604,7 +895,7 @@ export default function SubmitWizard() {
           <p className="mx-auto mt-3 max-w-[620px] text-base leading-7 text-muted sm:text-[17px]">{intro}</p>
         </div>
 
-        {restored && step === 0 && (
+        {restored && currentStep === 0 && (
           <p
             className="mx-auto mt-6 flex w-fit items-center gap-2 rounded-full border border-line bg-white px-3.5 py-1.5 text-[13px] text-muted shadow-xs"
             role="status"
@@ -620,24 +911,37 @@ export default function SubmitWizard() {
               <div className="divide-y divide-line">
                 {section.questions
                   .filter((q) => isVisible(q, answers))
-                  .map((q) => (
-                    <QuestionField key={q.id} q={q} value={answers[q.id]} error={errors[q.id]} onChange={(v) => setAnswer(q.id, v)} />
-                  ))}
+                  .map((q) =>
+                    q.id === "asset_type" && kind === "skill" ? (
+                      <FixedField key={q.id} id={q.id} label={q.label} value="Agent skill" onChange={openChooser} />
+                    ) : (
+                      <QuestionField
+                        key={q.id}
+                        q={q.id === "asset_type" ? withoutSkillOption(q) : q}
+                        value={answers[q.id]}
+                        error={errors[q.id]}
+                        onChange={(v) => setAnswer(q.id, v)}
+                      />
+                    ),
+                  )}
               </div>
             </Card>
 
             <FooterBar>
-              {step > 0 ? (
-                <button type="button" onClick={() => goTo(step - 1)} className={bigSecondary}>
+              {currentStep > 0 ? (
+                <button type="button" onClick={() => goTo(currentStep - 1)} className={bigSecondary}>
                   <ArrowLeftIcon size={18} />
                   Back
                 </button>
               ) : (
-                <span />
+                <button type="button" onClick={openChooser} className={bigSecondary}>
+                  <ArrowLeftIcon size={18} />
+                  Back
+                </button>
               )}
               <div className="flex items-center gap-4">
-                <span className="hidden text-[13px] text-subtle sm:inline">{hydrated ? "Draft saved in this browser" : ""}</span>
-                <button type="button" onClick={() => continueFrom(step)} className={`${btn.hero} min-w-[148px]`}>
+                <span className="hidden text-[13px] text-subtle sm:inline">Draft saved in this browser</span>
+                <button type="button" onClick={() => continueFrom(currentStep)} className={`${btn.hero} min-w-[148px]`}>
                   Continue
                   <ArrowRightIcon size={18} />
                 </button>
@@ -647,6 +951,16 @@ export default function SubmitWizard() {
         ) : (
           <>
             <UploadStep
+              kind={kind}
+              source={source}
+              onSource={changeSource}
+              gitUrl={gitUrl}
+              gitRef={gitRef}
+              gitError={gitError}
+              gitRefError={gitRefError}
+              onGitUrl={onGitUrlChange}
+              onGitRef={onGitRefChange}
+              onGitUrlBlur={onGitUrlBlur}
               file={file}
               fileError={fileError}
               probe={probe}
@@ -654,6 +968,7 @@ export default function SubmitWizard() {
               demoLoading={demoLoading}
               fileInputRef={fileInputRef}
               answers={answers}
+              sections={sections}
               stepStates={stepStates}
               incomplete={incomplete}
               confirmed={confirmed}
@@ -663,7 +978,7 @@ export default function SubmitWizard() {
                 if (v) setConfirmError(false);
               }}
               onSelectFile={selectFile}
-              onDemo={loadDemoApp}
+              onDemo={loadDemo}
               onDragState={setDragging}
               onDrop={onDrop}
               onEdit={goTo}
@@ -688,7 +1003,7 @@ export default function SubmitWizard() {
             )}
 
             <FooterBar note={allValid ? undefined : "Submitting takes you to the first incomplete section."}>
-              <button type="button" onClick={() => goTo(step - 1)} className={bigSecondary}>
+              <button type="button" onClick={() => goTo(currentStep - 1)} className={bigSecondary}>
                 <ArrowLeftIcon size={18} />
                 Back
               </button>
@@ -700,7 +1015,142 @@ export default function SubmitWizard() {
         )}
       </div>
 
-      {!section && <AfterSubmit />}
+      {!section && <AfterSubmit kind={kind} />}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ first screen: what are you submitting? */
+
+function KindChooser({
+  headingRef,
+  pick,
+  error,
+  canClear,
+  onPick,
+  onContinue,
+  onClear,
+}: {
+  headingRef: RefObject<HTMLHeadingElement | null>;
+  pick: Kind | null;
+  error: boolean;
+  canClear: boolean;
+  onPick: (k: Kind) => void;
+  onContinue: () => void;
+  onClear: () => void;
+}) {
+  return (
+    <div className="mx-auto max-w-[860px]">
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+        <p className="text-sm font-semibold text-ink-2">New submission</p>
+        {canClear && (
+          <button type="button" onClick={onClear} className={`${btn.ghost} -mr-3`}>
+            Clear form
+          </button>
+        )}
+      </div>
+
+      <div className="mt-10 text-center sm:mt-12">
+        <h1
+          id="kind-title"
+          ref={headingRef}
+          tabIndex={-1}
+          className="text-[30px] font-bold leading-[1.2] tracking-[-0.025em] text-ink focus:outline-none sm:text-[38px]"
+        >
+          What are you submitting?
+        </h1>
+        <p className="mx-auto mt-3 max-w-[620px] text-base leading-7 text-muted sm:text-[17px]">
+          Pick the path that fits. Both end in the same scan and gate decision; you can change your choice later and keep your answers.
+        </p>
+      </div>
+
+      <div
+        role="radiogroup"
+        aria-labelledby="kind-title"
+        aria-required="true"
+        aria-invalid={error ? true : undefined}
+        aria-describedby={error ? "kind-error" : undefined}
+        className="mt-8 grid gap-4 sm:grid-cols-2"
+      >
+        {KIND_OPTIONS.map((o) => {
+          const checked = pick === o.value;
+          return (
+            <label
+              key={o.value}
+              className={`relative flex cursor-pointer flex-col rounded-2xl border bg-white p-6 shadow-xs transition-colors has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-brand sm:p-7 ${
+                checked ? "border-brand ring-1 ring-inset ring-brand" : `${error ? "border-sev-critical/50" : "border-line"} hover:border-line-strong hover:bg-surface-2`
+              }`}
+            >
+              <input
+                type="radio"
+                name="submission-kind"
+                value={o.value}
+                checked={checked}
+                onChange={() => onPick(o.value)}
+                className="sr-only"
+              />
+              <span className="flex items-start justify-between gap-4">
+                <span
+                  aria-hidden="true"
+                  className={`flex size-12 items-center justify-center rounded-xl ${checked ? "bg-brand text-white" : "bg-brand-soft text-brand"}`}
+                >
+                  {o.value === "skill" ? <SkillIcon size={24} /> : <AppIcon size={24} />}
+                </span>
+                <span
+                  aria-hidden="true"
+                  className={`mt-1 flex size-5 shrink-0 items-center justify-center rounded-full border-2 bg-white transition-colors ${
+                    checked ? "border-brand" : "border-line-strong"
+                  }`}
+                >
+                  {checked && <span className="size-2.5 rounded-full bg-brand" />}
+                </span>
+              </span>
+              <span className="mt-5 font-display text-[19px] font-bold text-ink">{o.title}</span>
+              <span className="mt-2 text-[15px] leading-6 text-muted">{o.text}</span>
+              <span className="mt-5 flex flex-wrap gap-2 pt-1">
+                {o.meta.map((m) => (
+                  <span key={m} className="inline-flex h-6 items-center rounded-full bg-surface-2 px-2.5 text-xs font-medium text-ink-2 ring-1 ring-inset ring-line">
+                    {m}
+                  </span>
+                ))}
+              </span>
+            </label>
+          );
+        })}
+      </div>
+      {error && (
+        <p id="kind-error" className="mt-3 flex items-center gap-1.5 text-[13px] font-medium text-sev-critical" role="alert">
+          <AlertIcon size={15} />
+          Choose what you are submitting to continue.
+        </p>
+      )}
+      <p className="mt-4 text-sm text-muted">Not sure? Choose AI application or model: it covers every kind of AI asset.</p>
+
+      <FooterBar>
+        <span />
+        <button type="button" onClick={onContinue} className={`${btn.hero} min-w-[148px]`}>
+          Continue
+          <ArrowRightIcon size={18} />
+        </button>
+      </FooterBar>
+    </div>
+  );
+}
+
+/** Read-only answer (the asset type in the skill path). */
+function FixedField({ id, label, value, onChange }: { id: string; label: string; value: string; onChange: () => void }) {
+  return (
+    <div id={`field-${id}`} className="scroll-mt-24 px-5 py-6 sm:px-8 sm:py-7">
+      <p className="text-[15px] font-semibold leading-6 text-ink">{label}</p>
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <span className="inline-flex h-8 items-center gap-2 rounded-full bg-brand-soft px-3 text-sm font-semibold text-brand-strong">
+          <SkillIcon size={16} />
+          {value}
+        </span>
+        <button type="button" onClick={onChange} className="text-sm font-semibold text-brand hover:text-brand-strong hover:underline">
+          Change what you submit
+        </button>
+      </div>
     </div>
   );
 }
@@ -709,8 +1159,20 @@ export default function SubmitWizard() {
 
 const STATE_TEXT: Record<StepState, string> = { complete: "Complete", attention: "Needs attention", started: "In progress", todo: "Not started" };
 
-function StepProgress({ step, states, onSelect }: { step: number; states: StepState[]; onSelect: (i: number) => void }) {
-  const total = STEP_TITLES.length;
+function StepProgress({
+  step,
+  titles,
+  short,
+  states,
+  onSelect,
+}: {
+  step: number;
+  titles: string[];
+  short: string[];
+  states: StepState[];
+  onSelect: (i: number) => void;
+}) {
+  const total = titles.length;
   const pct = Math.round(((step + 0.5) / total) * 100);
   return (
     <div className="mt-5">
@@ -725,19 +1187,19 @@ function StepProgress({ step, states, onSelect }: { step: number; states: StepSt
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={pct}
-          aria-valuetext={`Step ${step + 1} of ${total}: ${STEP_TITLES[step]}`}
+          aria-valuetext={`Step ${step + 1} of ${total}: ${titles[step] ?? ""}`}
           className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-line"
         >
           <span className="block h-full rounded-full bg-brand transition-[width] duration-500" style={{ width: `${pct}%` }} />
         </span>
-        <span className="max-w-[40%] shrink-0 truncate text-[13px] text-muted">{STEP_TITLES[step]}</span>
+        <span className="max-w-[40%] shrink-0 truncate text-[13px] text-muted">{titles[step]}</span>
       </div>
 
       {/* Segmented step list */}
       <nav aria-label="Submission steps" className="mt-4">
         <ol className="grid gap-1.5 sm:gap-2" style={{ gridTemplateColumns: `repeat(${total}, minmax(0, 1fr))` }}>
-          {STEP_TITLES.map((title, i) => {
-            const state = i < SECTIONS.length ? states[i] : "upload";
+          {titles.map((title, i) => {
+            const state: StepState | "upload" = i < states.length ? states[i] : "upload";
             const current = i === step;
             const bar =
               state === "attention"
@@ -764,7 +1226,7 @@ function StepProgress({ step, states, onSelect }: { step: number; states: StepSt
                   className="group flex w-full flex-col gap-2 rounded-md py-1.5 text-left"
                 >
                   <span className={`h-1 w-full rounded-full transition-colors ${bar}`} />
-                  <span className={`hidden text-xs leading-4 transition-colors group-hover:text-ink sm:block ${label}`}>{STEP_SHORT[i]}</span>
+                  <span className={`hidden text-xs leading-4 transition-colors group-hover:text-ink sm:block ${label}`}>{short[i]}</span>
                 </button>
               </li>
             );
@@ -1043,7 +1505,162 @@ function FileRow({ file, error, probe, onRemove }: { file: File; error: string |
   );
 }
 
+const SOURCE_OPTIONS: { value: SourceMode; label: string }[] = [
+  { value: "file", label: "Upload a file" },
+  { value: "git", label: "Git repository" },
+];
+
+function SourceToggle({ value, onChange }: { value: SourceMode; onChange: (m: SourceMode) => void }) {
+  return (
+    <div className="flex justify-center">
+      <div role="group" aria-label="How do you want to provide the code?" className="inline-flex rounded-xl border border-line-strong bg-white p-1 shadow-xs">
+        {SOURCE_OPTIONS.map((o) => {
+          const pressed = value === o.value;
+          return (
+            <button
+              key={o.value}
+              type="button"
+              aria-pressed={pressed}
+              onClick={() => onChange(o.value)}
+              className={`inline-flex h-10 items-center gap-2 rounded-lg px-4 text-sm font-semibold transition-colors ${
+                pressed ? "bg-brand-soft text-brand-strong ring-1 ring-inset ring-brand/30" : "text-ink-2 hover:bg-surface-2"
+              }`}
+            >
+              {o.value === "file" ? <UploadIcon size={16} /> : <GitBranchIcon size={16} />}
+              {o.label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function DemoLink({ kind, loading, onDemo, prefix }: { kind: Kind; loading: boolean; onDemo: () => void; prefix: string }) {
+  return (
+    <p className="text-[13px] text-muted">
+      {prefix}{" "}
+      <button
+        type="button"
+        onClick={onDemo}
+        disabled={loading}
+        className="inline-flex items-center gap-1.5 font-semibold text-brand hover:text-brand-strong hover:underline disabled:text-faint disabled:no-underline"
+      >
+        {loading && <SpinnerIcon size={13} />}
+        Use the {DEMO[kind].label}
+      </button>
+    </p>
+  );
+}
+
+function GitSourceCard(props: {
+  kind: Kind;
+  gitUrl: string;
+  gitRef: string;
+  gitError: string | null;
+  gitRefError: string | null;
+  onGitUrl: (v: string) => void;
+  onGitRef: (v: string) => void;
+  onGitUrlBlur: () => void;
+  demoLoading: boolean;
+  onDemo: () => void;
+}) {
+  const { gitError, gitRefError } = props;
+  return (
+    <div className="rounded-[20px] border border-line bg-white px-5 py-6 shadow-xs sm:px-8 sm:py-8">
+      <div className="flex items-start gap-4">
+        <span aria-hidden="true" className="hidden size-11 shrink-0 items-center justify-center rounded-xl bg-brand-soft text-brand sm:flex">
+          <GitBranchIcon size={22} />
+        </span>
+        <div className="min-w-0 flex-1 space-y-6">
+          <div>
+            <label htmlFor="git-url" className="text-[15px] font-semibold leading-6 text-ink">
+              Repository link
+            </label>
+            <p id="git-url-help" className="mt-1 text-sm leading-6 text-muted">
+              Public repositories only. We download a snapshot; nothing is cloned or executed.
+            </p>
+            <input
+              id="git-url"
+              type="url"
+              inputMode="url"
+              autoComplete="off"
+              spellCheck={false}
+              value={props.gitUrl}
+              onChange={(e) => props.onGitUrl(e.target.value)}
+              onBlur={props.onGitUrlBlur}
+              placeholder="https://github.com/owner/repository"
+              maxLength={500}
+              aria-invalid={gitError ? true : undefined}
+              aria-describedby={gitError ? "git-url-help git-url-error" : "git-url-help"}
+              className={`${inputBase} ${gitError ? "border-sev-critical" : "border-line-strong"} mt-3 h-12 font-mono text-sm`}
+            />
+            {gitError && (
+              <p id="git-url-error" className="mt-2.5 flex items-start gap-1.5 text-[13px] font-medium text-sev-critical">
+                <AlertIcon size={15} className="mt-px shrink-0" />
+                {gitError}
+              </p>
+            )}
+            <ul className="mt-3 flex flex-wrap items-center gap-2" aria-label="Supported hosts">
+              {["github.com", "gitlab.com"].map((h) => (
+                <li key={h} className="inline-flex h-[26px] items-center rounded-full bg-surface-2 px-2.5 text-xs font-semibold text-ink-2 ring-1 ring-inset ring-line">
+                  {h}
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <div>
+            <div className="flex items-start justify-between gap-3">
+              <label htmlFor="git-ref" className="text-[15px] font-semibold leading-6 text-ink">
+                Branch, tag or commit
+              </label>
+              <span className="mt-0.5 inline-flex h-5 shrink-0 items-center rounded-full bg-surface-2 px-2 text-xs font-medium text-subtle ring-1 ring-inset ring-line">
+                Optional
+              </span>
+            </div>
+            <p id="git-ref-help" className="mt-1 text-sm leading-6 text-muted">
+              Leave empty to scan the default branch.
+            </p>
+            <input
+              id="git-ref"
+              type="text"
+              autoComplete="off"
+              spellCheck={false}
+              value={props.gitRef}
+              onChange={(e) => props.onGitRef(e.target.value)}
+              placeholder="e.g. main, v1.2.0 or a commit hash"
+              maxLength={200}
+              aria-invalid={gitRefError ? true : undefined}
+              aria-describedby={gitRefError ? "git-ref-help git-ref-error" : "git-ref-help"}
+              className={`${inputBase} ${gitRefError ? "border-sev-critical" : "border-line-strong"} mt-3 h-12 font-mono text-sm sm:max-w-sm`}
+            />
+            {gitRefError && (
+              <p id="git-ref-error" className="mt-2.5 flex items-start gap-1.5 text-[13px] font-medium text-sev-critical">
+                <AlertIcon size={15} className="mt-px shrink-0" />
+                {gitRefError}
+              </p>
+            )}
+          </div>
+
+          <DemoLink kind={props.kind} loading={props.demoLoading} onDemo={props.onDemo} prefix="No repository at hand?" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function UploadStep(props: {
+  kind: Kind;
+  source: SourceMode;
+  onSource: (m: SourceMode) => void;
+  gitUrl: string;
+  gitRef: string;
+  gitError: string | null;
+  gitRefError: string | null;
+  onGitUrl: (v: string) => void;
+  onGitRef: (v: string) => void;
+  onGitUrlBlur: () => void;
   file: File | null;
   fileError: string | null;
   probe: Probe;
@@ -1051,6 +1668,7 @@ function UploadStep(props: {
   demoLoading: boolean;
   fileInputRef: RefObject<HTMLInputElement | null>;
   answers: Answers;
+  sections: Section[];
   stepStates: StepState[];
   incomplete: Section[];
   confirmed: boolean;
@@ -1063,8 +1681,8 @@ function UploadStep(props: {
   onEdit: (step: number) => void;
   onFillExample: () => void;
 }) {
-  const { file, fileError, probe, dragging, demoLoading, fileInputRef, answers, stepStates, incomplete } = props;
-  const answeredAny = Object.keys(answers).some((k) => hasValue(answers[k]));
+  const { kind, source, file, fileError, probe, dragging, demoLoading, fileInputRef, answers, sections, stepStates, incomplete } = props;
+  const answeredAny = hasOwnAnswers(answers);
   const rowError = fileError ?? (probe.status === "error" ? probe.message : null);
   const completeCount = stepStates.filter((s) => s === "complete").length;
   const limitNote =
@@ -1072,91 +1690,103 @@ function UploadStep(props: {
       ? probe.info.mode === "inline"
         ? `Demo storage: files up to ${formatBytes(probe.info.maxBytes)} are accepted.`
         : `Uploaded directly to private storage, up to ${formatBytes(MAX_UPLOAD_BYTES)}.`
-      : `A .zip archive or a single source file, up to ${formatBytes(MAX_UPLOAD_BYTES)}.`;
+      : kind === "skill"
+        ? `A .zip of the skill folder (with its SKILL.md), up to ${formatBytes(MAX_UPLOAD_BYTES)}.`
+        : `A .zip archive or a single source file, up to ${formatBytes(MAX_UPLOAD_BYTES)}.`;
 
   return (
     <div className="mt-8 space-y-6">
-      {/* File */}
+      {/* Source */}
       <section aria-labelledby="file-heading" className="space-y-4">
         <h2 id="file-heading" className="sr-only">
-          Application source
+          {kind === "skill" ? "Skill source" : "Application source"}
         </h2>
-        <div
-          onDragOver={(e) => {
-            e.preventDefault();
-            e.dataTransfer.dropEffect = "copy";
-            if (!dragging) props.onDragState(true);
-          }}
-          onDragLeave={(e) => {
-            if (!e.currentTarget.contains(e.relatedTarget as Node | null)) props.onDragState(false);
-          }}
-          onDrop={props.onDrop}
-          className={`flex flex-col items-center gap-5 rounded-[20px] border-2 border-dashed px-6 py-10 text-center transition-colors sm:px-8 sm:py-11 ${
-            dragging ? "border-brand bg-brand-soft" : fileError ? "border-[#FDA29B] bg-white" : "border-[#C9D8E4] bg-tint"
-          }`}
-        >
-          <DocumentsIllustration />
-          <div className="space-y-1">
-            <p className="font-display text-[19px] font-bold text-ink">{dragging ? "Drop the file to add it" : "Drag your project here"}</p>
-            <p className="text-[15px] text-muted">or</p>
-          </div>
-          <label
-            className={`${btn.hero} cursor-pointer has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-brand`}
-          >
-            <UploadIcon size={18} />
-            {file ? "Choose another file" : "Choose a file"}
-            <input
-              ref={fileInputRef}
-              id="file-input"
-              type="file"
-              accept={ACCEPT}
-              className="sr-only"
-              aria-describedby={rowError ? "file-error" : "file-hint"}
-              onChange={(e) => {
-                props.onSelectFile(e.target.files?.[0] ?? null);
-                e.target.value = "";
-              }}
-            />
-          </label>
-          <div className="space-y-2.5">
-            <ul className="flex flex-wrap items-center justify-center gap-2" aria-label="Accepted formats include">
-              {FORMAT_CHIPS.map((c) => (
-                <li
-                  key={c}
-                  className="inline-flex h-[26px] items-center rounded-full bg-white px-2.5 text-xs font-semibold text-ink-2 ring-1 ring-inset ring-line"
-                >
-                  {c}
-                </li>
-              ))}
-            </ul>
-            <p id="file-hint" className="text-[13px] text-subtle">
-              {limitNote}
-            </p>
-          </div>
-          <p className="text-[13px] text-muted">
-            No project at hand?{" "}
-            <button
-              type="button"
-              onClick={props.onDemo}
-              disabled={demoLoading}
-              className="inline-flex items-center gap-1.5 font-semibold text-brand hover:text-brand-strong hover:underline disabled:text-faint disabled:no-underline"
-            >
-              {demoLoading && <SpinnerIcon size={13} />}
-              Use the demo application
-            </button>
-          </p>
-        </div>
+        <SourceToggle value={source} onChange={props.onSource} />
 
-        {file && <FileRow file={file} error={rowError} probe={probe} onRemove={() => props.onSelectFile(null)} />}
-        {!file && fileError && (
-          <p id="file-error" className="flex items-center gap-1.5 text-[13px] font-medium text-sev-critical" role="alert">
-            <AlertIcon size={15} />
-            {fileError}
-          </p>
+        {source === "git" ? (
+          <GitSourceCard
+            kind={kind}
+            gitUrl={props.gitUrl}
+            gitRef={props.gitRef}
+            gitError={props.gitError}
+            gitRefError={props.gitRefError}
+            onGitUrl={props.onGitUrl}
+            onGitRef={props.onGitRef}
+            onGitUrlBlur={props.onGitUrlBlur}
+            demoLoading={demoLoading}
+            onDemo={props.onDemo}
+          />
+        ) : (
+          <>
+            <div
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "copy";
+                if (!dragging) props.onDragState(true);
+              }}
+              onDragLeave={(e) => {
+                if (!e.currentTarget.contains(e.relatedTarget as Node | null)) props.onDragState(false);
+              }}
+              onDrop={props.onDrop}
+              className={`flex flex-col items-center gap-5 rounded-[20px] border-2 border-dashed px-6 py-10 text-center transition-colors sm:px-8 sm:py-11 ${
+                dragging ? "border-brand bg-brand-soft" : fileError ? "border-[#FDA29B] bg-white" : "border-[#C9D8E4] bg-tint"
+              }`}
+            >
+              <DocumentsIllustration />
+              <div className="space-y-1">
+                <p className="font-display text-[19px] font-bold text-ink">
+                  {dragging ? "Drop the file to add it" : kind === "skill" ? "Drag your skill folder (.zip) here" : "Drag your project here"}
+                </p>
+                <p className="text-[15px] text-muted">or</p>
+              </div>
+              <label
+                className={`${btn.hero} cursor-pointer has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-brand`}
+              >
+                <UploadIcon size={18} />
+                {file ? "Choose another file" : "Choose a file"}
+                <input
+                  ref={fileInputRef}
+                  id="file-input"
+                  type="file"
+                  accept={ACCEPT}
+                  className="sr-only"
+                  aria-describedby={rowError ? "file-error" : "file-hint"}
+                  onChange={(e) => {
+                    props.onSelectFile(e.target.files?.[0] ?? null);
+                    e.target.value = "";
+                  }}
+                />
+              </label>
+              <div className="space-y-2.5">
+                <ul className="flex flex-wrap items-center justify-center gap-2" aria-label="Accepted formats include">
+                  {(kind === "skill" ? [".zip", ".md"] : FORMAT_CHIPS).map((c) => (
+                    <li
+                      key={c}
+                      className="inline-flex h-[26px] items-center rounded-full bg-white px-2.5 text-xs font-semibold text-ink-2 ring-1 ring-inset ring-line"
+                    >
+                      {c}
+                    </li>
+                  ))}
+                </ul>
+                <p id="file-hint" className="text-[13px] text-subtle">
+                  {limitNote}
+                </p>
+              </div>
+              <DemoLink kind={kind} loading={demoLoading} onDemo={props.onDemo} prefix={kind === "skill" ? "No skill at hand?" : "No project at hand?"} />
+            </div>
+
+            {file && <FileRow file={file} error={rowError} probe={probe} onRemove={() => props.onSelectFile(null)} />}
+            {!file && fileError && (
+              <p id="file-error" className="flex items-center gap-1.5 text-[13px] font-medium text-sev-critical" role="alert">
+                <AlertIcon size={15} />
+                {fileError}
+              </p>
+            )}
+          </>
         )}
         {!answeredAny && (
           <p className="text-sm text-muted">
-            Using the demo application?{" "}
+            Using the {DEMO[kind].label}?{" "}
             <button type="button" onClick={props.onFillExample} className="font-semibold text-brand hover:text-brand-strong hover:underline">
               Fill the questionnaire with example answers
             </button>
@@ -1175,7 +1805,7 @@ function UploadStep(props: {
             <p className="mt-1 text-sm text-muted">Open a section to check what you entered.</p>
           </div>
           <StatusPill tone={incomplete.length ? "warn" : "ok"}>
-            {completeCount} of {SECTIONS.length} complete
+            {completeCount} of {sections.length} complete
           </StatusPill>
         </div>
 
@@ -1191,10 +1821,10 @@ function UploadStep(props: {
                   <li key={s.id}>
                     <button
                       type="button"
-                      onClick={() => props.onEdit(SECTIONS.indexOf(s))}
+                      onClick={() => props.onEdit(sections.indexOf(s))}
                       className="inline-flex items-center gap-0.5 font-medium underline underline-offset-2 hover:text-[#7A4505]"
                     >
-                      {s.title}
+                      {sectionTitle(s, kind)}
                       <ChevronRightIcon size={14} />
                     </button>
                   </li>
@@ -1205,14 +1835,14 @@ function UploadStep(props: {
         )}
 
         <div className="divide-y divide-line">
-          {SECTIONS.map((s, i) => {
+          {sections.map((s, i) => {
             const qs = s.questions.filter((q) => isVisible(q, answers));
             const answered = qs.filter((q) => hasValue(answers[q.id])).length;
             const complete = stepStates[i] === "complete";
             return (
               <details key={s.id} className="group">
                 <summary className="flex items-center gap-3 px-5 py-3.5 transition-colors hover:bg-surface-2 sm:px-6">
-                  <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink">{s.title}</span>
+                  <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink">{sectionTitle(s, kind)}</span>
                   <span className="tabular hidden text-[13px] text-subtle sm:inline">
                     {answered}/{qs.length} answered
                   </span>
@@ -1256,7 +1886,7 @@ function UploadStep(props: {
             aria-describedby={props.confirmError ? "confirm-error" : undefined}
             className="mt-[3px] size-[18px] shrink-0 accent-brand"
           />
-          <span>I confirm the information is accurate and I am authorised to submit this asset.</span>
+          <span>I confirm the information is accurate and I am authorised to submit this {kind === "skill" ? "skill" : "asset"}.</span>
         </label>
         {props.confirmError && (
           <p id="confirm-error" className="mt-2 flex items-center gap-1.5 pl-[30px] text-[13px] font-medium text-sev-critical">
@@ -1269,14 +1899,15 @@ function UploadStep(props: {
 }
 
 /** "What happens after you submit" explainer shown under the final step. */
-function AfterSubmit() {
+function AfterSubmit({ kind }: { kind: Kind }) {
+  const items = [AFTER_SUBMIT_FIRST[kind], ...AFTER_SUBMIT_REST];
   return (
     <section aria-labelledby="after-heading" className="mt-14 border-t border-line pt-10 sm:mt-16 sm:pt-12">
       <h2 id="after-heading" className="text-[22px] font-bold tracking-tight text-ink">
         What happens after you submit
       </h2>
       <ol className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {AFTER_SUBMIT.map((s, i) => (
+        {items.map((s, i) => (
           <li key={s.title} className="flex flex-col gap-2.5 rounded-xl border border-line bg-white p-5 shadow-xs">
             <span
               aria-hidden="true"
@@ -1298,31 +1929,35 @@ function AfterSubmit() {
 
 function ScanProgress({
   assetName,
-  file,
+  run,
   phase,
   simStep,
   elapsedMs,
 }: {
   assetName: string;
-  file: File | null;
+  run: Run | null;
   phase: Phase;
   simStep: number;
   elapsedMs: number;
 }) {
+  const mode: SourceMode = run?.mode ?? "file";
+  const kind: Kind = run?.kind ?? "app";
+  const steps = scanSteps(mode, kind);
   const done = phase === "redirecting";
-  const active = phase === "uploading" ? 0 : done ? SCAN_STEPS.length : simStep;
+  const active = phase === "uploading" ? 0 : done ? steps.length : simStep;
   const secs = Math.floor(elapsedMs / 1000);
   const elapsed = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
+  const firstLabel = steps[0]?.label ?? "Uploading";
 
   return (
     <div className="mx-auto max-w-[680px] sm:pt-4">
       <div className="text-center">
         <span className="inline-flex h-7 items-center gap-1.5 rounded-full bg-brand-soft px-3 text-xs font-semibold text-brand-strong">
           {done ? <CheckIcon size={14} strokeWidth={2.25} /> : <SpinnerIcon size={14} />}
-          {done ? "Scan complete" : phase === "uploading" ? "Uploading" : "Scan in progress"}
+          {done ? "Scan complete" : active === 0 ? firstLabel : "Scan in progress"}
         </span>
         <h1 id="scan-title" className="mt-4 text-[30px] font-bold leading-[1.2] tracking-[-0.025em] text-ink sm:text-[36px]">
-          {done ? "Your report is ready" : "Scanning your application"}
+          {done ? "Your report is ready" : kind === "skill" ? "Reviewing your skill" : "Scanning your application"}
         </h1>
         <p className="mx-auto mt-3 max-w-[560px] text-base leading-7 text-muted sm:text-[17px]">
           {done ? "Opening the report…" : "This usually takes 5 to 40 seconds. Keep this tab open; the report opens automatically."}
@@ -1338,10 +1973,11 @@ function ScanProgress({
           <InitialsTile name={assetName} />
           <div className="min-w-0 flex-1">
             <p className="truncate font-display text-base font-bold text-ink">{assetName}</p>
-            {file && (
+            {run && (
               <p className="flex min-w-0 items-center gap-1.5 text-[13px] text-subtle">
-                <span className="truncate font-mono">{file.name}</span>
-                <span className="tabular shrink-0">· {formatBytes(file.size)}</span>
+                {run.mode === "git" && <GitBranchIcon size={13} className="shrink-0" />}
+                <span className="truncate font-mono">{run.name}</span>
+                <span className="tabular shrink-0">· {run.detail}</span>
               </p>
             )}
           </div>
@@ -1352,10 +1988,10 @@ function ScanProgress({
         </div>
 
         <ol className="divide-y divide-line" aria-label="Scan progress">
-          {SCAN_STEPS.map((label, i) => {
+          {steps.map((s, i) => {
             const state = i < active ? "done" : i === active ? "active" : "pending";
             return (
-              <li key={label} className={`flex items-center gap-3 px-5 py-3 sm:px-6 ${state === "active" ? "bg-tint" : ""}`}>
+              <li key={s.label} className={`flex items-center gap-3 px-5 py-3 sm:px-6 ${state === "active" ? "bg-tint" : ""}`}>
                 <span className="flex size-6 shrink-0 items-center justify-center">
                   {state === "done" ? (
                     <span className="flex size-5 items-center justify-center rounded-full bg-brand text-white">
@@ -1372,7 +2008,7 @@ function ScanProgress({
                     state === "done" ? "text-ink-2" : state === "active" ? "font-semibold text-ink" : "text-faint"
                   }`}
                 >
-                  {label}
+                  {s.label}
                 </span>
                 <span
                   className={`shrink-0 text-[13px] ${
@@ -1387,10 +2023,10 @@ function ScanProgress({
         </ol>
 
         <div className="border-t border-line bg-surface-2 px-5 py-3 text-[13px] text-subtle sm:px-6">
-          Step timing is indicative; all scanners run in one server job. Uploaded code is never executed.
+          Step timing is indicative; all scanners run in one server job. {mode === "git" ? "The repository snapshot" : "Uploaded code"} is never executed.
         </div>
         <p className="sr-only" aria-live="polite">
-          {done ? "Scan complete. Opening the report." : SCAN_STEPS[Math.min(active, SCAN_STEPS.length - 1)]}
+          {done ? "Scan complete. Opening the report." : (steps[Math.min(active, steps.length - 1)]?.label ?? "")}
         </p>
       </Card>
     </div>

@@ -20,7 +20,17 @@ Teams submit their application (zip) and complete an intake questionnaire. The g
 | AI / LLM security | OWASP Top 10 for LLM Applications 2025 (prompt injection, output handling, excessive agency, supply chain …) |
 | Model artefacts | ModelScan-style pickle opcode analysis, Keras Lambda layers, NumPy object arrays |
 | Configuration & IaC | Hadolint- and Checkov-derived rules for Dockerfiles, Terraform, Bicep, Kubernetes, GitHub Actions |
+| Agent skill review | Agent Skills format and best practices: structure, quality and security of `SKILL.md`, reference files and scripts, with improvement suggestions |
+| Licences & deprecation | [deps.dev](https://deps.dev) (Open Source Insights): copyleft, missing licences and deprecated packages |
+| Answers vs. code | Flags intake answers that contradict the scan, such as "no external AI" when the code calls a public LLM API |
 | Questionnaire | NIST AI RMF, ISO/IEC 42001, EU AI Act, GDPR, OWASP AI Exchange, MITRE ATLAS |
+
+There are two intake paths:
+
+- **AI application or model:** six questionnaire sections.
+- **Agent skill:** ownership details only, followed by the skill review.
+
+You can provide the code in three ways: upload a zip, link a public GitHub or GitLab repository, or use the built-in demo.
 
 Outputs: an interactive report, a JSON report and a CycloneDX 1.5 SBOM. Reviewer approval, catalogue publication and an append-only audit trail are included.
 

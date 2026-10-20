@@ -30,7 +30,7 @@ import {
   humanize,
   shortHash,
 } from "@/lib/format";
-import { AI_ACT_LABEL, ALL_QUESTIONS, SECTIONS, answerLabel, isVisible } from "@/lib/questionnaire";
+import { AI_ACT_LABEL, ALL_QUESTIONS, SECTIONS, answerLabel, isSkill, isVisible } from "@/lib/questionnaire";
 import { DECISION_LABEL, PASS_SCORE } from "@/lib/scoring";
 import { getStore } from "@/lib/store";
 import { SEVERITIES, type AuditEvent, type Decision, type Finding, type PackageRef, type Report, type ScannerId, type Severity, type Submission } from "@/lib/types";
@@ -40,6 +40,7 @@ import FindingsExplorer from "./FindingsExplorer";
 import FixFirstLink from "./FixFirstLink";
 import PrintButton from "./PrintButton";
 import ReviewPanel from "./ReviewPanel";
+import SkillFeedback from "./SkillFeedback";
 
 export const dynamic = "force-dynamic";
 
@@ -232,6 +233,8 @@ export default async function ReportPage({ params }: Props) {
 
       <Hero s={s} report={report} />
 
+      {report && report.skills && report.skills.length > 0 ? <SkillFeedback skills={report.skills} /> : null}
+
       <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_340px] print:block">
         <div className="min-w-0 space-y-6 print:space-y-5">
           {report && (
@@ -314,7 +317,15 @@ const HERO: Record<HeroTone, { card: string; divider: string; pill: string; dot:
 };
 
 /** One or two short plain-language sentences: what the result means and what happens next. */
+/** True for Agent Skill submissions (light intake, skill feedback in the report). */
+function isSkillSubmission(s: Submission): boolean {
+  return s.asset_type === "skill" || isSkill(s.answers ?? {});
+}
+
 function heroMessage(s: Submission, report: Report, decision: Decision): string {
+  const skill = isSkillSubmission(s);
+  const noun = skill ? "skill" : "asset";
+  const feedback = skill && (report.skills?.length ?? 0) > 0;
   if (s.catalog_status === "published") {
     return `Published to the Azure AI catalogue${s.published_at ? ` on ${formatDate(s.published_at)}` : ""}. This report and the SBOM are attached to the catalogue entry.`;
   }
@@ -322,18 +333,28 @@ function heroMessage(s: Submission, report: Report, decision: Decision): string 
     return `Rejected by ${s.reviewer ?? "the reviewer"}. Address the reviewer's comment and the findings below, then submit a new version.`;
   }
   if (s.review_status === "approved") {
-    return `Approved by ${s.reviewer ?? "the reviewer"}. The asset can now be published to the Azure AI catalogue.`;
+    return `Approved by ${s.reviewer ?? "the reviewer"}. The ${noun} can now be published to the Azure AI catalogue.`;
   }
   const failedBlocking = report.gates.filter((g) => g.blocking && !g.passed).length;
   const failedOther = report.gates.filter((g) => !g.blocking && !g.passed).length;
   const counts = s.counts ?? countFindings(report.findings);
   if (decision === "blocked") {
-    return `This asset can't be published yet: ${plural(failedBlocking, "blocking check")} failed. Fix the issues listed here, then submit a new version.`;
+    return `This ${noun} can't be published yet: ${plural(failedBlocking, "blocking check")} failed. Fix the issues listed here, then submit a new version.`;
   }
   if (decision === "conditional") {
+    if (skill) {
+      return `No blocking issues, but a security reviewer has to accept the remaining risk before the skill is published.${
+        feedback ? " The skill feedback below shows what to improve first." : ""
+      }`;
+    }
     return counts.high > 0
       ? `No blocking issues, but a security reviewer has to accept the remaining risk before publication. Fixing the ${plural(counts.high, "high-severity finding")} speeds up approval.`
       : `No blocking issues, but ${plural(failedOther, "check")} ${failedOther === 1 ? "needs" : "need"} a security reviewer's sign-off before the asset can be published.`;
+  }
+  if (skill) {
+    return `All ${report.gates.length} checks passed. A security reviewer signs off next, then the skill can be published to the catalogue.${
+      feedback ? " The skill feedback below has suggestions to make it even better." : ""
+    }`;
   }
   return `All ${report.gates.length} checks passed. A security reviewer signs off next, then the asset can be published to the catalogue.`;
 }
@@ -425,7 +446,7 @@ function Hero({ s, report }: { s: Submission; report: Report | null }) {
               </a>
             </Fact>
             <Fact label="Business unit">{businessUnitLabel(s.business_unit)}</Fact>
-            <Fact label="Asset type">{assetTypeLabel(s.asset_type)}</Fact>
+            <Fact label="Asset type">{isSkillSubmission(s) ? "Agent skill" : assetTypeLabel(s.asset_type)}</Fact>
             <Fact label="EU AI Act">
               <span
                 title={s.ai_act_tier ? AI_ACT_LABEL[s.ai_act_tier] : undefined}
@@ -437,7 +458,7 @@ function Hero({ s, report }: { s: Submission; report: Report | null }) {
             <Fact label="Submitted">
               <span className="tabular">{formatDateTime(s.created_at)}</span>
             </Fact>
-            <Fact label="Uploaded file">
+            <Fact label="Scanned file">
               <span className="flex min-w-0 items-center gap-1.5">
                 <FileIcon size={15} className="shrink-0 text-subtle" />
                 <span className="truncate print:whitespace-normal print:break-all" title={s.file_name ?? undefined}>
@@ -687,6 +708,9 @@ function CoverageCard({ report }: { report: Report }) {
 function DependenciesCard({ report }: { report: Report }) {
   const rows = report.packages.length ? dependencyRows(report.packages, report.findings) : [];
   const vulnerable = rows.filter((r) => r.vuln).length;
+  const basis = report.packages.some((p) => Array.isArray(p.licenses))
+    ? "Packages resolved from manifests and lockfiles, checked against OSV.dev; licences from deps.dev."
+    : "Packages resolved from manifests and lockfiles, checked against OSV.dev.";
   return (
     <Card labelledBy="deps-title">
       <CardHeader
@@ -696,7 +720,7 @@ function DependenciesCard({ report }: { report: Report }) {
         description={
           rows.length ? (
             <>
-              Packages resolved from manifests and lockfiles, checked against OSV.dev.{" "}
+              {basis}{" "}
               {vulnerable > 0 ? (
                 <span className="font-medium text-sev-critical">{plural(vulnerable, "package")} with known vulnerabilities.</span>
               ) : (
@@ -704,7 +728,7 @@ function DependenciesCard({ report }: { report: Report }) {
               )}
             </>
           ) : (
-            "Packages resolved from manifests and lockfiles, checked against OSV.dev."
+            basis
           )
         }
       />
