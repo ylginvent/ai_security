@@ -4,8 +4,8 @@ import type { CatalogStatus, Decision, ReviewStatus, SubmissionStatus } from "@/
 export type Tone = "neutral" | "ok" | "warn" | "danger" | "brand" | "muted";
 
 const TONE: Record<Tone, { box: string; dot: string }> = {
-  neutral: { box: "bg-slate-100 text-slate-700", dot: "bg-slate-500" },
-  muted: { box: "bg-white text-slate-500 ring-1 ring-inset ring-slate-200", dot: "bg-slate-300" },
+  neutral: { box: "bg-[#F2F4F7] text-ink-2", dot: "bg-subtle" },
+  muted: { box: "bg-white text-subtle ring-1 ring-inset ring-line", dot: "bg-line-strong" },
   ok: { box: "bg-ok-soft text-ok", dot: "bg-ok" },
   warn: { box: "bg-warn-soft text-warn", dot: "bg-sev-medium" },
   danger: { box: "bg-sev-critical-soft text-sev-critical", dot: "bg-sev-critical" },
@@ -15,7 +15,7 @@ const TONE: Record<Tone, { box: string; dot: string }> = {
 export function StatusPill({ tone = "neutral", children, dot = true }: { tone?: Tone; children: ReactNode; dot?: boolean }) {
   const t = TONE[tone];
   return (
-    <span className={`inline-flex h-5 items-center gap-1.5 whitespace-nowrap rounded px-1.5 text-xs font-medium ${t.box}`}>
+    <span className={`inline-flex h-6 items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 text-xs font-medium ${t.box}`}>
       {dot && <span className={`size-1.5 rounded-full ${t.dot}`} aria-hidden="true" />}
       {children}
     </span>

@@ -20,7 +20,7 @@ export const DECISION_STYLE: Record<Decision, { chip: string; text: string; bar:
   },
 };
 
-const base = "inline-flex h-6 items-center gap-1.5 whitespace-nowrap rounded px-2 text-xs font-medium ring-1 ring-inset";
+const base = "inline-flex h-6 items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 text-xs font-medium ring-1 ring-inset";
 
 export function DecisionBadge({
   decision,
@@ -33,7 +33,7 @@ export function DecisionBadge({
 }) {
   if (status === "scanning") {
     return (
-      <span className={`${base} bg-slate-50 text-slate-600 ring-slate-200`}>
+      <span className={`${base} bg-surface-2 text-ink-2 ring-line`}>
         <SpinnerIcon size={12} />
         Scanning
       </span>
@@ -42,7 +42,7 @@ export function DecisionBadge({
   if (status === "failed") {
     return <span className={`${base} bg-white text-sev-critical ring-sev-critical/40`}>Scan failed</span>;
   }
-  if (!decision) return <span className="text-slate-400">—</span>;
+  if (!decision) return <span className="text-faint">—</span>;
   const s = DECISION_STYLE[decision];
   return (
     <span className={`${base} ${s.chip}`}>

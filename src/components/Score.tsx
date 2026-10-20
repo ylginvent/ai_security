@@ -1,21 +1,21 @@
 import { PASS_SCORE } from "@/lib/scoring";
 
 function tone(score: number): { stroke: string; bar: string; text: string } {
-  if (score >= PASS_SCORE) return { stroke: "#067647", bar: "bg-ok", text: "text-ok" };
-  if (score >= 50) return { stroke: "#B7791F", bar: "bg-sev-medium", text: "text-sev-medium-ink" };
-  return { stroke: "#B42318", bar: "bg-sev-critical", text: "text-sev-critical" };
+  if (score >= PASS_SCORE) return { stroke: "#12B76A", bar: "bg-[#12B76A]", text: "text-ok" };
+  if (score >= 50) return { stroke: "#F79009", bar: "bg-[#F79009]", text: "text-warn" };
+  return { stroke: "#F04438", bar: "bg-[#F04438]", text: "text-sev-critical" };
 }
 
 /** Trust score as a number with a thin bar; used in tables. */
 export function ScoreBar({ score }: { score: number | null }) {
-  if (score === null || score === undefined) return <span className="text-slate-400">—</span>;
+  if (score === null || score === undefined) return <span className="text-faint">—</span>;
   const t = tone(score);
   return (
     <span className="inline-flex items-center gap-2" title={`Trust score ${score} of 100`}>
-      <span className="tabular w-7 text-right text-sm font-semibold text-slate-900">{score}</span>
-      <span className="relative h-1.5 w-16 overflow-hidden rounded-full bg-slate-100" aria-hidden="true">
+      <span className="tabular w-7 text-right text-sm font-semibold text-ink">{score}</span>
+      <span className="relative h-2 w-20 overflow-hidden rounded-full bg-line" aria-hidden="true">
         <span className={`absolute inset-y-0 left-0 rounded-full ${t.bar}`} style={{ width: `${Math.max(2, Math.min(100, score))}%` }} />
-        <span className="absolute inset-y-0 w-px bg-slate-400" style={{ left: `${PASS_SCORE}%` }} />
+        <span className="absolute inset-y-0 w-px bg-white" style={{ left: `${PASS_SCORE}%` }} />
       </span>
     </span>
   );
@@ -35,7 +35,7 @@ export function ScoreRing({ score, size = 104 }: { score: number; size?: number 
   return (
     <div className="relative shrink-0" style={{ width: size, height: size }} role="img" aria-label={`Trust score ${score} out of 100`}>
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} aria-hidden="true">
-        <circle cx={cx} cy={cx} r={r} fill="none" stroke="#E2E8F0" strokeWidth={stroke} />
+        <circle cx={cx} cy={cx} r={r} fill="none" stroke="#EAECF0" strokeWidth={stroke} />
         <circle
           cx={cx}
           cy={cx}
@@ -43,6 +43,7 @@ export function ScoreRing({ score, size = 104 }: { score: number; size?: number 
           fill="none"
           stroke={t.stroke}
           strokeWidth={stroke}
+          strokeLinecap="round"
           strokeDasharray={`${c * pct} ${c}`}
           transform={`rotate(-90 ${cx} ${cx})`}
         />
@@ -56,8 +57,8 @@ export function ScoreRing({ score, size = 104 }: { score: number; size?: number 
         />
       </svg>
       <div className="absolute inset-0 flex flex-col items-center justify-center">
-        <span className={`tabular text-[28px] font-semibold leading-none ${t.text}`}>{score}</span>
-        <span className="mt-1 text-[11px] text-slate-500">of 100</span>
+        <span className={`tabular font-display text-[30px] font-bold leading-none ${t.text}`}>{score}</span>
+        <span className="mt-1 text-xs text-subtle">of 100</span>
       </div>
     </div>
   );

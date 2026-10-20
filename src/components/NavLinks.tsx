@@ -5,14 +5,14 @@ import { usePathname } from "next/navigation";
 
 const LINKS = [
   { href: "/", label: "Overview" },
-  { href: "/submit", label: "New submission" },
+  { href: "/submit", label: "Submit asset" },
   { href: "/methodology", label: "Methodology" },
 ] as const;
 
 export function NavLinks() {
   const pathname = usePathname() ?? "/";
   return (
-    <nav aria-label="Main" className="-mb-px flex h-full items-stretch gap-1 overflow-x-auto">
+    <nav aria-label="Main" className="flex min-w-0 items-center gap-1 overflow-x-auto">
       {LINKS.map((l) => {
         const active = l.href === "/" ? pathname === "/" || pathname.startsWith("/reports") : pathname.startsWith(l.href);
         return (
@@ -20,8 +20,8 @@ export function NavLinks() {
             key={l.href}
             href={l.href}
             aria-current={active ? "page" : undefined}
-            className={`flex items-center whitespace-nowrap border-b-2 px-3 text-[13px] font-medium transition-colors focus-visible:outline-white focus-visible:-outline-offset-2 ${
-              active ? "border-[#4FA3D9] text-white" : "border-transparent text-slate-300 hover:text-white"
+            className={`whitespace-nowrap rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+              active ? "bg-surface-2 text-ink ring-1 ring-inset ring-line" : "text-muted hover:bg-surface-2 hover:text-ink"
             }`}
           >
             {l.label}

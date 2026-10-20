@@ -195,10 +195,10 @@ export function SpinnerIcon({ className, ...p }: IconProps) {
 /** Product mark: a stylised gate (two posts and a bar). */
 export function GateMark({ size = 22, className }: { size?: number; className?: string }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" focusable="false" className={className}>
-      <rect width="24" height="24" rx="3" fill="#0070AD" />
-      <path d="M7 18V7M17 18V7M7 10.5h10" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" fill="none" />
-      <path d="M10 14.5h4" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" opacity="0.6" />
+    <svg width={size} height={size} viewBox="0 0 28 28" aria-hidden="true" focusable="false" className={className}>
+      <rect width="28" height="28" rx="8" fill="#0070AD" />
+      <path d="M8.5 20V9.5M19.5 20V9.5M8.5 12.5h11" stroke="#fff" strokeWidth="2" strokeLinecap="round" fill="none" />
+      <path d="M11.5 16.5h5" stroke="#fff" strokeWidth="2" strokeLinecap="round" opacity="0.6" />
     </svg>
   );
 }

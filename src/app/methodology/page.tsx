@@ -132,11 +132,11 @@ export default function MethodologyPage() {
       <div className="grid gap-6 lg:grid-cols-[200px_minmax(0,1fr)] lg:gap-8">
         <nav aria-label="On this page" className="hidden lg:block">
           <div className="sticky top-6">
-            <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.06em] text-slate-500">On this page</div>
-            <ul className="space-y-0.5 border-l border-slate-200">
+            <div className="mb-2 text-[11px] font-medium uppercase tracking-[0.06em] text-subtle">On this page</div>
+            <ul className="space-y-0.5 border-l border-line">
               {TOC.map((t) => (
                 <li key={t.id}>
-                  <a href={`#${t.id}`} className="-ml-px block border-l border-transparent py-1 pl-3 text-[13px] text-slate-600 hover:border-slate-400 hover:text-slate-900">
+                  <a href={`#${t.id}`} className="-ml-px block border-l border-transparent py-1 pl-3 text-[13px] text-muted hover:border-slate-400 hover:text-ink">
                     {t.label}
                   </a>
                 </li>
@@ -153,7 +153,7 @@ export default function MethodologyPage() {
           >
             <TableScroll label="Scanners">
               <table className="w-full min-w-[760px] text-[13px]">
-                <thead className="border-b border-slate-200 bg-slate-50/70">
+                <thead className="border-b border-line bg-surface-2/70">
                   <tr>
                     <th scope="col" className={th}>Scanner</th>
                     <th scope="col" className={th}>What is checked</th>
@@ -161,13 +161,13 @@ export default function MethodologyPage() {
                     <th scope="col" className={th}>Gate impact</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100 align-top">
+                <tbody className="divide-y divide-line align-top">
                   {SCANNERS.map((s) => (
                     <tr key={s.name}>
-                      <td className={`${td} whitespace-nowrap align-top font-medium text-slate-900`}>{s.name}</td>
-                      <td className={`${td} align-top leading-5 text-slate-600`}>{s.checks}</td>
-                      <td className={`${td} align-top leading-5 text-slate-700`}>{s.basis}</td>
-                      <td className={`${td} whitespace-nowrap align-top text-slate-700`}>{s.impact}</td>
+                      <td className={`${td} whitespace-nowrap align-top font-medium text-ink`}>{s.name}</td>
+                      <td className={`${td} align-top leading-5 text-muted`}>{s.checks}</td>
+                      <td className={`${td} align-top leading-5 text-ink-2`}>{s.basis}</td>
+                      <td className={`${td} whitespace-nowrap align-top text-ink-2`}>{s.impact}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -182,7 +182,7 @@ export default function MethodologyPage() {
           >
             <TableScroll label="OWASP LLM Top 10 coverage">
               <table className="w-full min-w-[680px] text-[13px]">
-                <thead className="border-b border-slate-200 bg-slate-50/70">
+                <thead className="border-b border-line bg-surface-2/70">
                   <tr>
                     <th scope="col" className={th}>ID</th>
                     <th scope="col" className={th}>Risk</th>
@@ -190,13 +190,13 @@ export default function MethodologyPage() {
                     <th scope="col" className={`${th} text-center`}>Questionnaire</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
+                <tbody className="divide-y divide-line">
                   {OWASP.map((o) => (
                     <tr key={o.id}>
-                      <td className={`${td} whitespace-nowrap align-top font-mono text-xs text-slate-700`}>{o.id}:2025</td>
+                      <td className={`${td} whitespace-nowrap align-top font-mono text-xs text-ink-2`}>{o.id}:2025</td>
                       <td className={`${td} align-top`}>
-                        <div className="font-medium text-slate-900">{o.name}</div>
-                        <div className="mt-0.5 leading-5 text-slate-500">{o.desc}</div>
+                        <div className="font-medium text-ink">{o.name}</div>
+                        <div className="mt-0.5 leading-5 text-subtle">{o.desc}</div>
                         {o.cov === "manual" && <div className="mt-1 text-xs font-medium text-warn">Not automated — assessed during reviewer sign-off.</div>}
                       </td>
                       <td className={`${td} text-center align-top`}>
@@ -217,11 +217,11 @@ export default function MethodologyPage() {
             title="Questionnaire frameworks"
             description="The intake questionnaire has six sections. Answers that indicate risk produce findings that count towards the gate like scanner findings."
           >
-            <dl className="divide-y divide-slate-100">
+            <dl className="divide-y divide-line">
               {FRAMEWORKS.map((f) => (
                 <div key={f.name} className="grid gap-1 px-4 py-3 sm:grid-cols-[220px_minmax(0,1fr)] sm:gap-6 sm:px-5">
-                  <dt className="text-[13px] font-medium text-slate-900">{f.name}</dt>
-                  <dd className="text-[13px] leading-5 text-slate-600">{f.use}</dd>
+                  <dt className="text-[13px] font-medium text-ink">{f.name}</dt>
+                  <dd className="text-[13px] leading-5 text-muted">{f.use}</dd>
                 </div>
               ))}
             </dl>
@@ -230,48 +230,48 @@ export default function MethodologyPage() {
           <Section id="gate" title="Gate policy" description="The decision is deterministic and recorded with the report and audit trail.">
             <div className="grid gap-px bg-slate-200 md:grid-cols-2">
               <div className="bg-white px-4 py-4 sm:px-5">
-                <h3 className="flex items-center gap-2 text-[13px] font-semibold text-slate-900">
+                <h3 className="flex items-center gap-2 text-[13px] font-semibold text-ink">
                   <span className="size-2 rounded-full bg-sev-critical" aria-hidden="true" />
                   Blocking gates
                 </h3>
-                <p className="mt-1 text-xs text-slate-500">Any failure results in Blocked. The asset cannot be approved.</p>
+                <p className="mt-1 text-xs text-subtle">Any failure results in Blocked. The asset cannot be approved.</p>
                 <ul className="mt-3 space-y-2.5">
                   {BLOCKING.map((g) => (
                     <li key={g.label} className="text-[13px]">
-                      <div className="font-medium text-slate-800">{g.label}</div>
-                      <div className="text-slate-500">{g.detail}</div>
+                      <div className="font-medium text-ink-2">{g.label}</div>
+                      <div className="text-subtle">{g.detail}</div>
                     </li>
                   ))}
                 </ul>
               </div>
               <div className="bg-white px-4 py-4 sm:px-5">
-                <h3 className="flex items-center gap-2 text-[13px] font-semibold text-slate-900">
+                <h3 className="flex items-center gap-2 text-[13px] font-semibold text-ink">
                   <span className="size-2 rounded-full bg-sev-medium" aria-hidden="true" />
                   Non-blocking gates
                 </h3>
-                <p className="mt-1 text-xs text-slate-500">Any failure results in Manual review required.</p>
+                <p className="mt-1 text-xs text-subtle">Any failure results in Manual review required.</p>
                 <ul className="mt-3 space-y-2.5">
                   {NON_BLOCKING.map((g) => (
                     <li key={g.label} className="text-[13px]">
-                      <div className="font-medium text-slate-800">{g.label}</div>
-                      <div className="text-slate-500">{g.detail}</div>
+                      <div className="font-medium text-ink-2">{g.label}</div>
+                      <div className="text-subtle">{g.detail}</div>
                     </li>
                   ))}
                 </ul>
               </div>
             </div>
-            <ol className="grid border-t border-slate-200 text-[13px] sm:grid-cols-3">
+            <ol className="grid border-t border-line text-[13px] sm:grid-cols-3">
               <li className="px-4 py-3 sm:px-5">
                 <div className="font-semibold text-sev-critical">Blocked</div>
-                <div className="mt-0.5 text-slate-600">A blocking gate failed. Fix and resubmit.</div>
+                <div className="mt-0.5 text-muted">A blocking gate failed. Fix and resubmit.</div>
               </li>
-              <li className="border-t border-slate-200 px-4 py-3 sm:border-l sm:border-t-0 sm:px-5">
+              <li className="border-t border-line px-4 py-3 sm:border-l sm:border-t-0 sm:px-5">
                 <div className="font-semibold text-warn">Manual review required</div>
-                <div className="mt-0.5 text-slate-600">No blocking failure, but at least one non-blocking gate failed.</div>
+                <div className="mt-0.5 text-muted">No blocking failure, but at least one non-blocking gate failed.</div>
               </li>
-              <li className="border-t border-slate-200 px-4 py-3 sm:border-l sm:border-t-0 sm:px-5">
+              <li className="border-t border-line px-4 py-3 sm:border-l sm:border-t-0 sm:px-5">
                 <div className="font-semibold text-ok">Approved for catalogue</div>
-                <div className="mt-0.5 text-slate-600">All gates passed. A reviewer still signs off before publication.</div>
+                <div className="mt-0.5 text-muted">All gates passed. A reviewer still signs off before publication.</div>
               </li>
             </ol>
           </Section>
@@ -284,40 +284,40 @@ export default function MethodologyPage() {
             <div className="grid gap-6 px-4 py-4 sm:px-5 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
               <TableScroll>
                 <table className="w-full text-[13px]">
-                  <thead className="border-b border-slate-200">
+                  <thead className="border-b border-line">
                     <tr>
-                      <th scope="col" className="py-2 pr-3 text-left text-[11px] font-medium uppercase tracking-[0.06em] text-slate-500">Severity</th>
-                      <th scope="col" className="py-2 text-right text-[11px] font-medium uppercase tracking-[0.06em] text-slate-500">Points per finding</th>
+                      <th scope="col" className="py-2 pr-3 text-left text-[11px] font-medium uppercase tracking-[0.06em] text-subtle">Severity</th>
+                      <th scope="col" className="py-2 text-right text-[11px] font-medium uppercase tracking-[0.06em] text-subtle">Points per finding</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100">
+                  <tbody className="divide-y divide-line">
                     {WEIGHTS.map((w) => (
                       <tr key={w.sev}>
                         <td className="py-2 pr-3">
-                          <span className="inline-flex items-center gap-2 text-slate-800">
+                          <span className="inline-flex items-center gap-2 text-ink-2">
                             <span className={`size-2 rounded-full ${w.cls}`} aria-hidden="true" />
                             {w.sev}
                           </span>
                         </td>
-                        <td className="tabular py-2 text-right font-mono text-slate-900">−{w.w}</td>
+                        <td className="tabular py-2 text-right font-mono text-ink">−{w.w}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </TableScroll>
-              <div className="space-y-3 text-[13px] leading-5 text-slate-600">
-                <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-xs text-slate-800">
+              <div className="space-y-3 text-[13px] leading-5 text-muted">
+                <p className="rounded-md border border-line bg-surface-2 px-3 py-2 font-mono text-xs text-ink-2">
                   score = max(0, 100 − Σ weight × min(hits per rule, 3))
                 </p>
                 <p>
-                  The pass threshold is <span className="tabular font-semibold text-slate-900">{PASS_SCORE}</span>. One critical finding already fails the
+                  The pass threshold is <span className="tabular font-semibold text-ink">{PASS_SCORE}</span>. One critical finding already fails the
                   blocking gate regardless of the score; the score separates assets with a few minor findings from assets with many.
                 </p>
               </div>
             </div>
           </Section>
 
-          <section id="limitations" aria-labelledby="limitations-title" className="scroll-mt-6 rounded-lg border border-amber-200 bg-amber-50 px-4 py-4 sm:px-5">
+          <section id="limitations" aria-labelledby="limitations-title" className="scroll-mt-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-4 sm:px-5">
             <h2 id="limitations-title" className="flex items-center gap-2 text-[15px] font-semibold text-amber-950">
               <InfoIcon size={18} className="text-amber-700" />
               Limitations of this demo

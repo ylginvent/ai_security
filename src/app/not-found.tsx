@@ -8,8 +8,8 @@ export default function NotFound() {
   return (
     <div className="mx-auto max-w-lg py-16 text-center">
       <p className="font-mono text-xs font-medium text-brand">404</p>
-      <h1 className="mt-2 text-xl font-semibold tracking-tight text-slate-900">Page or submission not found</h1>
-      <p className="mt-2 text-sm leading-6 text-slate-600">
+      <h1 className="mt-2 text-xl font-semibold tracking-tight text-ink">Page or submission not found</h1>
+      <p className="mt-2 text-sm leading-6 text-muted">
         The link may be incorrect, or the submission no longer exists. In demo mode, submissions are kept in memory and disappear when the server
         restarts.
       </p>
