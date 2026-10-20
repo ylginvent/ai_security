@@ -1,0 +1,135 @@
+@import "tailwindcss";
+
+@theme {
+  --color-brand: #0070ad;
+  --color-brand-strong: #005a8c;
+  --color-brand-soft: #e8f2f9;
+  --color-navy: #0b1f33;
+  --color-navy-2: #14304c;
+  --color-canvas: #f5f7f9;
+
+  --color-ok: #067647;
+  --color-ok-soft: #ecfdf3;
+  --color-warn: #a15c07;
+  --color-warn-soft: #fffaeb;
+
+  --color-sev-critical: #b42318;
+  --color-sev-high: #d9480f;
+  --color-sev-medium: #b7791f;
+  --color-sev-low: #2f6fb0;
+  --color-sev-info: #64748b;
+
+  /* Text variants with >= 4.5:1 contrast on the soft backgrounds. */
+  --color-sev-critical-ink: #b42318;
+  --color-sev-high-ink: #a8380b;
+  --color-sev-medium-ink: #85570c;
+  --color-sev-low-ink: #285f97;
+  --color-sev-info-ink: #475569;
+
+  --color-sev-critical-soft: #fef3f2;
+  --color-sev-high-soft: #fff4ed;
+  --color-sev-medium-soft: #fdf6e7;
+  --color-sev-low-soft: #eff5fb;
+  --color-sev-info-soft: #f1f5f9;
+
+  --font-sans: var(--font-plex), ui-sans-serif, system-ui, "Segoe UI", Arial, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, "Cascadia Mono", Consolas, monospace;
+
+  --animate-indeterminate: indeterminate 1.6s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+@keyframes indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
+}
+
+/* Base styles live in the base layer so Tailwind utilities can override them. */
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    scrollbar-gutter: stable;
+  }
+
+  body {
+    background: var(--color-canvas);
+    color: #0f172a;
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  ::selection {
+    background: #cfe3f1;
+  }
+
+  /* One consistent keyboard focus style for every interactive element. */
+  :where(a, button, input, textarea, select, summary, [tabindex]):focus-visible {
+    outline: 2px solid var(--color-brand);
+    outline-offset: 2px;
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  summary {
+    cursor: pointer;
+    list-style: none;
+  }
+  summary::-webkit-details-marker {
+    display: none;
+  }
+}
+
+@utility tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media print {
+  @page {
+    size: A4;
+    margin: 14mm 12mm;
+  }
+  html,
+  body {
+    background: #fff !important;
+  }
+  table {
+    min-width: 0 !important;
+  }
+  pre {
+    max-height: none !important;
+    overflow: visible !important;
+  }
+  * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  a {
+    text-decoration: none !important;
+  }
+  .avoid-break {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  details::details-content {
+    content-visibility: visible;
+    display: block;
+  }
+}
