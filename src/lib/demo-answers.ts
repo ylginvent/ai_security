@@ -58,3 +58,20 @@ export const DEMO_ANSWERS: Answers = {
   documentation: "no",
   ethics_review: "yes",
 };
+
+/**
+ * Example intake answers for the bundled demo Agent Skill (invoice-summariser-skill.zip).
+ * Skills only fill in the "Asset & ownership" section; every value exists in questionnaire.ts.
+ */
+export const DEMO_SKILL_ANSWERS: Answers = {
+  asset_name: "Invoice Summariser Skill",
+  asset_version: "0.3.0",
+  owner_name: "Jonas Verhoeven",
+  owner_email: "jonas.verhoeven@capgemini.com",
+  business_unit: "apps",
+  description:
+    "Agent skill that reads supplier invoices (PDF or text), extracts the totals, VAT and due dates, and writes a short summary for the finance team. Includes a helper script that parses the files.",
+  asset_type: "skill",
+  lifecycle: "pilot",
+  intended_users: "internal",
+};

@@ -1,5 +1,7 @@
 import { handle, HttpError, json, readJson, str } from "@/lib/server/http";
-import { submitAsset } from "@/lib/server/submissions";
+import { downloadRepository, parseGitUrl } from "@/lib/server/git";
+import { sanitizeAnswers, submitAsset } from "@/lib/server/submissions";
+import { validateAnswers } from "@/lib/questionnaire";
 import { getStore, INLINE_MAX_BYTES } from "@/lib/store";
 import type { Submission } from "@/lib/types";
 
@@ -29,8 +31,18 @@ export async function POST(req: Request) {
       sub = await submitAsset(answers, { fileName: file.name, size: file.size, data: new Uint8Array(await file.arrayBuffer()) });
     } else {
       const body = await readJson(req);
-      const upload = (body.upload ?? {}) as Record<string, unknown>;
-      sub = await submitAsset(body.answers, { fileName: str(upload.fileName), size: Number(upload.size) || 0, path: str(upload.path, 300) });
+      const source = (body.source ?? null) as Record<string, unknown> | null;
+      if (source && source.type === "git") {
+        // eerst de intake controleren, dan pas downloaden
+        const errors = validateAnswers(sanitizeAnswers(body.answers));
+        if (Object.keys(errors).length) throw new HttpError(400, "The questionnaire is incomplete.", errors);
+        const git = parseGitUrl(str(source.url, 500), str(source.ref, 200));
+        const { fileName, data } = await downloadRepository(git);
+        sub = await submitAsset(body.answers, { fileName, size: data.byteLength, data, origin: { type: "git", url: git.url, ref: git.ref } });
+      } else {
+        const upload = (body.upload ?? {}) as Record<string, unknown>;
+        sub = await submitAsset(body.answers, { fileName: str(upload.fileName), size: Number(upload.size) || 0, path: str(upload.path, 300) });
+      }
     }
     return json({ id: sub.id, decision: sub.decision, score: sub.score }, 201);
   });

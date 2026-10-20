@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Finding, PackageRef, ScanStats, ScannerId, ScannerRun } from "../types";
+import type { Finding, PackageRef, ScanStats, ScannerId, ScannerRun, SkillReview } from "../types";
 import { SEVERITIES } from "../types";
 import { errorMessage, readArchive, type Archive, type RawFinding, type ScannerResult } from "./archive";
 import { scanAi, scanSast } from "./code";
@@ -7,12 +7,15 @@ import { scanConfig } from "./config";
 import { scanDependencies } from "./dependencies";
 import { scanModels } from "./models";
 import { scanSecrets } from "./secrets";
+import { scanSkills } from "./skills";
 
 export interface ScanOutput {
   findings: Finding[];
   scanners: ScannerRun[];
   stats: ScanStats;
   packages: PackageRef[];
+  /** Eén review per SKILL.md in het archief (leeg als het geen Agent Skill bevat). */
+  skills: SkillReview[];
 }
 
 export const ENGINE_VERSION = "2026.10.0";
@@ -31,6 +34,7 @@ const SCANNERS: ScannerDef[] = [
   { id: "ai", name: "AI / LLM security", engine: "OWASP Top 10 for LLM Applications 2025" },
   { id: "model", name: "Model artefact scanning", engine: "ModelScan-style pickle opcode analysis" },
   { id: "config", name: "Configuration & IaC", engine: "Hadolint & Checkov-derived rules" },
+  { id: "skill", name: "Agent skill review", engine: "Agent Skills spec + skill security rules" },
 ];
 
 interface Timed {
@@ -90,11 +94,21 @@ export async function scanArchive(fileName: string, data: Uint8Array): Promise<S
     return r;
   });
   const results = new Map<ScannerDef["id"], Timed>();
-  results.set("secrets", await timed(() => scanSecrets(archive)));
+  const secrets = await timed(() => scanSecrets(archive));
+  results.set("secrets", secrets);
   results.set("sast", await timed(() => scanSast(archive)));
   results.set("ai", await timed(() => scanAi(archive)));
   results.set("model", await timed(() => scanModels(archive)));
   results.set("config", await timed(() => scanConfig(archive)));
+  let skills: SkillReview[] = [];
+  results.set(
+    "skill",
+    await timed(() => {
+      const r = scanSkills(archive, secrets.result.findings);
+      skills = r.skills;
+      return r;
+    }),
+  );
   const deps = await depsPromise;
   results.set("dependencies", deps);
 
@@ -122,5 +136,5 @@ export async function scanArchive(fileName: string, data: Uint8Array): Promise<S
 
   all.sort(compareFindings);
   const stats: ScanStats = { ...archive.stats, packages: packages.length };
-  return { findings: withIds(all), scanners, stats, packages };
+  return { findings: withIds(all), scanners, stats, packages, skills };
 }

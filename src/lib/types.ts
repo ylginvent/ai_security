@@ -2,7 +2,7 @@ export type Severity = "critical" | "high" | "medium" | "low" | "info";
 
 export const SEVERITIES: Severity[] = ["critical", "high", "medium", "low", "info"];
 
-export type ScannerId = "secrets" | "dependencies" | "sast" | "ai" | "model" | "config" | "questionnaire";
+export type ScannerId = "secrets" | "dependencies" | "sast" | "ai" | "model" | "config" | "skill" | "questionnaire" | "consistency";
 
 export interface Finding {
   id: string;
@@ -32,6 +32,8 @@ export interface PackageRef {
   /** Afgeleid uit een range (^1.2.3) in plaats van een lockfile. */
   approximate?: boolean;
   source: string;
+  /** SPDX-licenties volgens deps.dev (leeg = geen licentie gevonden; ontbreekt = niet opgevraagd). */
+  licenses?: string[];
 }
 
 export interface ScannerRun {
@@ -63,6 +65,33 @@ export interface Report {
   gates: GateResult[];
   generatedAt: string;
   engineVersion: string;
+  /** Eén review per gevonden SKILL.md (Agent Skills-formaat). Ontbreekt bij oudere rapporten. */
+  skills?: SkillReview[];
+}
+
+export interface SkillCheck {
+  id: string;
+  category: "structure" | "quality" | "security";
+  label: string;
+  passed: boolean;
+  /** Uitleg bij falen, of wat er goed ging. */
+  detail: string;
+  /** Concrete verbetersuggestie als de check faalt. */
+  suggestion?: string;
+}
+
+export interface SkillReview {
+  /** Pad van de skill-map in het archief ("" = root). */
+  path: string;
+  name: string | null;
+  description: string | null;
+  files: number;
+  scripts: string[];
+  lines: number;
+  checks: SkillCheck[];
+  /** 0–100, kwaliteit + veiligheid van de skill. */
+  score: number;
+  summary: string;
 }
 
 export interface GateResult {

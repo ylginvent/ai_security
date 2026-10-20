@@ -532,6 +532,15 @@ export async function scanDependencies(archive: Archive): Promise<DependencyResu
     return { findings, packages, status: "skipped", note: "No supported dependency manifests or lockfiles found." };
   }
 
+  // deps.dev (licenties, deprecation) loopt parallel aan OSV; fouten worden stil genegeerd
+  const depsDevPromise = queryDepsDev(packages);
+  const withDepsDev = async (notes: string[]): Promise<string | undefined> => {
+    const dd = await depsDevPromise;
+    findings.push(...depsDevFindings(dd));
+    notes.push(depsDevNote(dd, packages.length));
+    return notes.length ? notes.join(" ") : undefined;
+  };
+
   /* --- OSV querybatch --- */
   const vulnIdsPerPkg: string[][] = packages.map(() => []);
   let failedChunks = 0;
@@ -565,7 +574,7 @@ export async function scanDependencies(archive: Archive): Promise<DependencyResu
       remediation: "Re-run the scan later, or run osv-scanner / pip-audit / npm audit in the build pipeline and attach the result.",
       refs: ["OWASP LLM03:2025"],
     });
-    return { findings, packages, status: "error", note: `OSV.dev unreachable: ${lastError}` };
+    return { findings, packages, status: "error", note: await withDepsDev([`OSV.dev unreachable: ${lastError}`]) };
   }
 
   /* --- details per advisory --- */
@@ -652,7 +661,178 @@ export async function scanDependencies(archive: Archive): Promise<DependencyResu
   if (failedChunks) notes.push(`${failedChunks} of ${chunks.length} OSV batch request(s) failed (${lastError}).`);
   const missing = uniqueIds.length - details.size;
   if (missing > 0) notes.push(`Details for ${missing} advisor${missing === 1 ? "y" : "ies"} could not be retrieved; those findings use default severity.`);
-  return { findings, packages, status: failedChunks ? "error" : "ok", note: notes.length ? notes.join(" ") : undefined };
+  return { findings, packages, status: failedChunks ? "error" : "ok", note: await withDepsDev(notes) };
+}
+
+/* ------------------------------------------- deps.dev (Open Source Insights) */
+
+const DEPS_DEV = "https://api.deps.dev/v3/systems";
+const DEPS_DEV_MAX = 150;
+const DEPS_DEV_CONCURRENCY = 12;
+const DEPS_DEV_TIMEOUT = 6000;
+const DEPS_DEV_BUDGET_MS = 12000;
+
+const DEPS_DEV_SYSTEM: Record<Ecosystem, string> = {
+  npm: "NPM",
+  PyPI: "PYPI",
+  Go: "GO",
+  Maven: "MAVEN",
+  NuGet: "NUGET",
+  "crates.io": "CARGO",
+};
+
+interface DepsDevInfo {
+  licenses: string[];
+  deprecated: boolean;
+  reason?: string;
+}
+
+interface DepsDevResult {
+  info: Map<PackageRef, DepsDevInfo>;
+  queried: number;
+}
+
+/** Licenties en deprecation-status per package-versie bij deps.dev (lockfile-packages eerst). */
+async function queryDepsDev(packages: PackageRef[]): Promise<DepsDevResult> {
+  const deadline = Date.now() + DEPS_DEV_BUDGET_MS;
+  const ordered = [...packages.filter((p) => !p.approximate), ...packages.filter((p) => p.approximate)].slice(0, DEPS_DEV_MAX);
+  const info = new Map<PackageRef, DepsDevInfo>();
+  let next = 0;
+  const worker = async () => {
+    while (next < ordered.length && deadline - Date.now() > 300) {
+      const pkg = ordered[next++];
+      const version = pkg.ecosystem === "Go" && !/^v/.test(pkg.version) ? `v${pkg.version}` : pkg.version;
+      const url = `${DEPS_DEV}/${DEPS_DEV_SYSTEM[pkg.ecosystem]}/packages/${encodeURIComponent(pkg.name)}/versions/${encodeURIComponent(version)}`;
+      try {
+        const res = await fetchJson<unknown>(url, { method: "GET" }, Math.min(DEPS_DEV_TIMEOUT, deadline - Date.now()));
+        if (!isRecord(res)) continue;
+        const raw: unknown = res.licenses;
+        const licenses = Array.isArray(raw) ? raw.filter((l): l is string => typeof l === "string" && l.trim() !== "").map((l) => l.trim()) : [];
+        const reason = str(res.deprecatedReason)?.trim();
+        info.set(pkg, { licenses, deprecated: res.isDeprecated === true, reason: reason ? reason : undefined });
+        pkg.licenses = licenses;
+      } catch {
+        /* deps.dev is best-effort: onbekende packages (404), timeouts en netwerkfouten negeren */
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(DEPS_DEV_CONCURRENCY, ordered.length) }, () => worker()));
+  return { info, queried: ordered.length };
+}
+
+/** Sterke copyleft (GPL, AGPL, SSPL, EUPL, OSL); LGPL valt hier bewust buiten. */
+const COPYLEFT_ID = /^(AGPL|GPL|SSPL|EUPL|OSL)-(\d+(?:\.\d+)*)/i;
+const NON_COMMERCIAL = /-NC\b|-NC-|non-?commercial/i;
+
+function licenceIds(expr: string): string[] {
+  return expr.split(/[\s()]+/).filter((t) => t !== "" && !/^(?:AND|OR|WITH)$/i.test(t));
+}
+
+/** Copyleft-families ("GPL-3.0") van een SPDX-expressie; leeg als een OR-alternatief geen copyleft is. */
+function copyleftFamilies(expr: string): string[] {
+  const families: string[] = [];
+  for (const alt of expr.split(/\s+OR\s+/i)) {
+    const found: string[] = [];
+    for (const id of licenceIds(alt)) {
+      const m = COPYLEFT_ID.exec(id);
+      if (m) found.push(`${m[1].toUpperCase()}-${m[2]}`);
+    }
+    if (!found.length) return [];
+    families.push(...found);
+  }
+  return families;
+}
+
+const pkgLabel = (p: PackageRef) => `${p.name}@${p.version}`;
+
+function listPackages(pkgs: PackageRef[], max = 20): string {
+  const shown = pkgs.slice(0, max).map(pkgLabel).join(", ");
+  return pkgs.length > max ? `${shown} and ${pkgs.length - max} more` : shown;
+}
+
+/** Eén bronbestand als alle packages uit hetzelfde manifest komen. */
+function commonSource(pkgs: PackageRef[]): string | undefined {
+  const first = pkgs[0]?.source;
+  return first !== undefined && pkgs.every((p) => p.source === first) ? first : undefined;
+}
+
+function depsDevFindings(dd: DepsDevResult): RawFinding[] {
+  const out: RawFinding[] = [];
+  const copyleft = new Map<string, PackageRef[]>();
+  const unrecognised: { pkg: PackageRef; why: string }[] = [];
+  const deprecated: { pkg: PackageRef; reason?: string }[] = [];
+
+  dd.info.forEach((info, pkg) => {
+    const families = new Set<string>();
+    for (const l of info.licenses) for (const f of copyleftFamilies(l)) families.add(f);
+    families.forEach((f) => {
+      const list = copyleft.get(f) ?? [];
+      list.push(pkg);
+      copyleft.set(f, list);
+    });
+    const usable = info.licenses.filter((l) => l.toLowerCase() !== "non-standard" && !NON_COMMERCIAL.test(l));
+    if (!usable.length) {
+      const nc = info.licenses.filter((l) => NON_COMMERCIAL.test(l));
+      const why = !info.licenses.length ? "no licence found" : nc.length ? `non-commercial licence (${nc.join(", ")})` : "non-standard licence";
+      unrecognised.push({ pkg, why });
+    }
+    if (info.deprecated) deprecated.push({ pkg, reason: info.reason });
+  });
+
+  Array.from(copyleft.keys())
+    .sort()
+    .forEach((family) => {
+      const pkgs = copyleft.get(family) ?? [];
+      const network = /^(?:AGPL|SSPL)-/.test(family);
+      out.push({
+        scanner: "dependencies",
+        ruleId: "license-copyleft",
+        severity: "medium",
+        title: `Copyleft licences: ${family} (${pkgs.length} package${pkgs.length === 1 ? "" : "s"})`,
+        description: `Copyleft licence — review before redistribution. According to deps.dev (Open Source Insights), ${listPackages(pkgs)} ${pkgs.length === 1 ? "is" : "are"} licensed under ${family}. Strong copyleft licences require derivative works that are distributed${network ? " — or, for AGPL/SSPL, offered to users over a network —" : ""} to be released under the same licence, including source code, which can conflict with publishing the asset in the Capgemini catalogue or delivering it to clients.`,
+        remediation: `Have the licence reviewed (Legal / Open Source Programme Office) before the asset is redistributed. Replace the package with a permissively licensed alternative, isolate it so the asset is not a derivative work, or document how the ${family} obligations are met.`,
+        refs: ["OWASP LLM03:2025", `SPDX ${family}`],
+        file: commonSource(pkgs),
+      });
+    });
+
+  if (unrecognised.length) {
+    const pkgs = unrecognised.map((u) => u.pkg);
+    const detail = unrecognised
+      .slice(0, 20)
+      .map((u) => `${pkgLabel(u.pkg)} (${u.why})`)
+      .join(", ");
+    out.push({
+      scanner: "dependencies",
+      ruleId: "license-unknown",
+      severity: "low",
+      title: `Packages without a recognised licence (${unrecognised.length})`,
+      description: `deps.dev (Open Source Insights) reports no standard SPDX licence for: ${detail}${unrecognised.length > 20 ? ` and ${unrecognised.length - 20} more` : ""}. Without a recognised open-source licence (or with a non-commercial one) there is no clear right to use or redistribute the code commercially.`,
+      remediation: "Check the licence terms of each package in its repository. Replace packages that have no licence or a non-commercial licence, or obtain written permission from the copyright holder before publishing the asset.",
+      refs: ["OWASP LLM03:2025"],
+      file: commonSource(pkgs),
+    });
+  }
+
+  for (const { pkg, reason } of deprecated.slice(0, 30)) {
+    out.push({
+      scanner: "dependencies",
+      ruleId: "deprecated-package",
+      severity: "low",
+      title: `Deprecated: ${pkg.name} ${pkg.version}`,
+      description: `${pkgLabel(pkg)} (${pkg.ecosystem}) is marked as deprecated by its registry${reason ? `: "${clip(reason.replace(/\s+/g, " "), 200)}"` : ""}. Deprecated packages no longer receive fixes, so future vulnerabilities will not be patched.`,
+      remediation: `Upgrade ${pkg.name} to a supported release or migrate to the replacement recommended by its maintainers.`,
+      refs: ["OWASP LLM03:2025", "CWE-1104"],
+      file: pkg.source,
+    });
+  }
+  return out;
+}
+
+function depsDevNote(dd: DepsDevResult, total: number): string {
+  const capped = total > dd.queried ? ` (first ${dd.queried} of ${total} packages queried)` : "";
+  if (!dd.info.size) return `Licence and deprecation data from deps.dev was unavailable${capped}; licence checks were skipped.`;
+  return `Licence and deprecation data from deps.dev retrieved for ${dd.info.size} of ${dd.queried} package(s)${capped}.`;
 }
 
 function noLockfile(f: SourceFile, ecosystem: string, lock: string): RawFinding {

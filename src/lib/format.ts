@@ -100,7 +100,9 @@ export const SCANNER_LABEL: Record<ScannerId, string> = {
   ai: "AI / LLM rules",
   model: "Model artefacts",
   config: "Configuration & IaC",
+  skill: "Agent skill review",
   questionnaire: "Questionnaire",
+  consistency: "Answers vs. code",
 };
 
 export const AI_ACT_SHORT: Record<AiActTier, string> = {

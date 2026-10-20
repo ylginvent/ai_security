@@ -92,6 +92,7 @@ export const SECTIONS: Section[] = [
           { value: "cv_speech", label: "Computer vision / speech model" },
           { value: "library", label: "AI accelerator, SDK or code library" },
           { value: "prompts", label: "Prompt library / templates" },
+          { value: "skill", label: "Agent skill (SKILL.md)" },
         ],
       },
       {
@@ -881,14 +882,25 @@ export const AI_ACT_LABEL: Record<AiActTier, string> = {
   minimal: "Minimal risk",
 };
 
+/** Skills krijgen een lichte intake: alleen de sectie "Asset & ownership"; de rest volgt uit de scan. */
+export const isSkill = (a: Answers) => a.asset_type === "skill";
+
+const ASSET_QUESTION_IDS = new Set(SECTIONS[0].questions.map((q) => q.id));
+
+/** De secties die voor dit type asset ingevuld moeten worden. */
+export function sectionsFor(a: Answers): Section[] {
+  return isSkill(a) ? SECTIONS.slice(0, 1) : SECTIONS;
+}
+
 export function isVisible(q: Question, a: Answers) {
+  if (isSkill(a) && !ASSET_QUESTION_IDS.has(q.id)) return false;
   return !q.showIf || q.showIf(a);
 }
 
 /** Geeft een foutmelding per ontbrekend verplicht veld. */
 export function validateAnswers(a: Answers, sectionId?: string): Record<string, string> {
   const errors: Record<string, string> = {};
-  const sections = sectionId ? SECTIONS.filter((s) => s.id === sectionId) : SECTIONS;
+  const sections = sectionId ? SECTIONS.filter((s) => s.id === sectionId) : sectionsFor(a);
   for (const q of sections.flatMap((s) => s.questions)) {
     if (!isVisible(q, a)) continue;
     const v = a[q.id];

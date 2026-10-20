@@ -1,5 +1,6 @@
 import "server-only";
 import { createHash } from "node:crypto";
+import { consistencyFindings } from "../consistency";
 import { ALL_QUESTIONS, isVisible, questionnaireFindings, validateAnswers } from "../questionnaire";
 import { evaluate } from "../scoring";
 import { ENGINE_VERSION, scanArchive } from "../scanner";
@@ -39,6 +40,8 @@ export interface IncomingFile {
   data?: Uint8Array;
   /** Storage upload: de browser heeft het bestand al naar de bucket gestuurd. */
   path?: string;
+  /** Snapshot die de server zelf van een Git-repository downloadde. */
+  origin?: { type: "git"; url: string; ref: string | null };
 }
 
 export async function submitAsset(rawAnswers: unknown, file: IncomingFile): Promise<Submission> {
@@ -52,7 +55,8 @@ export async function submitAsset(rawAnswers: unknown, file: IncomingFile): Prom
   let path: string;
 
   if (file.data) {
-    if (file.data.byteLength > INLINE_MAX_BYTES) throw new HttpError(413, "File too large for direct upload.");
+    const max = file.origin ? STORAGE_MAX_BYTES : INLINE_MAX_BYTES;
+    if (file.data.byteLength > max) throw new HttpError(413, "File too large for direct upload.");
     data = file.data;
     path = uploadPath(fileName);
     await store.putFile(path, data, "application/octet-stream");
@@ -86,11 +90,16 @@ export async function submitAsset(rawAnswers: unknown, file: IncomingFile): Prom
     file_path: path,
     file_sha256: sha256,
   });
-  await store.addEvent(sub.id, owner, "submitted", { file: fileName, size: data.byteLength, sha256 });
+  await store.addEvent(sub.id, owner, "submitted", {
+    file: fileName,
+    size: data.byteLength,
+    sha256,
+    ...(file.origin ? { repository: file.origin.url, ref: file.origin.ref ?? "default branch" } : {}),
+  });
 
   try {
     const scan = await scanArchive(fileName, data);
-    const findings = [...scan.findings, ...questionnaireFindings(answers)];
+    const findings = [...scan.findings, ...questionnaireFindings(answers), ...consistencyFindings(answers, scan.findings)];
     const ev = evaluate(findings, answers);
     const report: Report = {
       findings,
@@ -100,6 +109,7 @@ export async function submitAsset(rawAnswers: unknown, file: IncomingFile): Prom
       gates: ev.gates,
       generatedAt: new Date().toISOString(),
       engineVersion: ENGINE_VERSION,
+      skills: scan.skills,
     };
     const done = await store.update(sub.id, {
       status: "completed",
