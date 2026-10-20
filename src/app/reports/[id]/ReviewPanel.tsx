@@ -25,7 +25,7 @@ export interface ReviewPanelProps {
 }
 
 const inputCls =
-  "block w-full rounded-md border bg-white px-3 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20";
+  "block w-full rounded-lg border bg-white px-3.5 text-sm text-ink shadow-xs placeholder:text-faint focus:border-brand focus:outline-none focus:ring-4 focus:ring-brand/15";
 
 export default function ReviewPanel(p: ReviewPanelProps) {
   const router = useRouter();
@@ -104,66 +104,67 @@ export default function ReviewPanel(p: ReviewPanelProps) {
   const reviewTone = p.reviewStatus === "approved" ? "ok" : p.reviewStatus === "rejected" ? "danger" : "neutral";
 
   return (
-    <section aria-labelledby="review-title" className="rounded-lg border border-slate-200 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)] print:hidden">
-      <div className="border-b border-slate-200 px-4 py-3">
-        <h2 id="review-title" className="text-[15px] font-semibold text-slate-900">
+    <section aria-labelledby="review-title" className="rounded-xl border border-line bg-white shadow-xs print:hidden">
+      <div className="border-b border-line px-5 py-4">
+        <h2 id="review-title" className="text-[17px] font-semibold text-ink">
           Review &amp; publication
         </h2>
+        <p className="mt-1 text-sm text-muted">A security reviewer signs off before the asset is listed.</p>
       </div>
 
       {/* Current state */}
-      <dl className="space-y-3 border-b border-slate-200 px-4 py-3 text-[13px]">
+      <dl className="space-y-3 border-b border-line px-5 py-4 text-sm">
         <div className="flex items-center justify-between gap-3">
-          <dt className="text-slate-500">Review</dt>
+          <dt className="text-muted">Review</dt>
           <dd>
             <StatusPill tone={reviewTone}>{REVIEW_LABEL[p.reviewStatus]}</StatusPill>
           </dd>
         </div>
         {p.reviewer && (
           <div className="flex items-start justify-between gap-3">
-            <dt className="text-slate-500">Reviewer</dt>
-            <dd className="text-right text-slate-800">
+            <dt className="text-muted">Reviewer</dt>
+            <dd className="text-right font-medium text-ink">
               {p.reviewer}
-              {p.reviewedAtLabel && <div className="tabular text-xs text-slate-500">{p.reviewedAtLabel}</div>}
+              {p.reviewedAtLabel && <div className="tabular text-xs font-normal text-subtle">{p.reviewedAtLabel}</div>}
             </dd>
           </div>
         )}
         {p.reviewComment && (
           <div>
             <dt className="sr-only">Review comment</dt>
-            <dd className="rounded-md border-l-2 border-slate-300 bg-slate-50 px-3 py-2 text-slate-700">{p.reviewComment}</dd>
+            <dd className="rounded-lg border border-line bg-surface-2 px-3.5 py-2.5 text-[13px] leading-5 text-ink-2">{p.reviewComment}</dd>
           </div>
         )}
         <div className="flex items-center justify-between gap-3">
-          <dt className="text-slate-500">Catalogue</dt>
+          <dt className="text-muted">Catalogue</dt>
           <dd>{published ? <StatusPill tone="brand">Published</StatusPill> : <StatusPill tone="muted">Not published</StatusPill>}</dd>
         </div>
       </dl>
 
-      <div className="px-4 py-4">
+      <div className="px-5 py-5">
         {!completed ? (
-          <p className="flex gap-2 text-[13px] text-slate-600">
-            <InfoIcon size={16} className="mt-0.5 shrink-0 text-slate-400" />
+          <p className="flex gap-2.5 text-sm leading-6 text-muted">
+            <InfoIcon size={18} className="mt-0.5 shrink-0 text-subtle" />
             {p.status === "failed" ? "The scan did not complete, so this submission cannot be reviewed. Resubmit the asset." : "Review becomes available once the scan has completed."}
           </p>
         ) : published ? (
-          <div className="rounded-md border border-brand/25 bg-brand-soft px-3 py-3">
-            <div className="flex items-center gap-2 text-[13px] font-semibold text-brand-strong">
-              <CheckCircleIcon size={16} />
+          <div className="rounded-lg border border-brand/20 bg-brand-soft px-4 py-3.5">
+            <div className="flex items-center gap-2 text-sm font-semibold text-brand-strong">
+              <CheckCircleIcon size={18} />
               Listed in the Azure AI catalogue
             </div>
-            <dl className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
-              <dt className="text-slate-500">Entry ID</dt>
-              <dd className="font-mono text-slate-800">{catalogueId}</dd>
-              <dt className="text-slate-500">Published</dt>
-              <dd className="tabular text-slate-800">{p.publishedAtLabel ?? "—"}</dd>
+            <dl className="mt-2.5 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-[13px]">
+              <dt className="text-muted">Entry ID</dt>
+              <dd className="font-mono text-xs leading-5 text-ink">{catalogueId}</dd>
+              <dt className="text-muted">Published</dt>
+              <dd className="tabular text-ink">{p.publishedAtLabel ?? "—"}</dd>
             </dl>
-            <p className="mt-2 text-xs text-slate-500">Catalogue publication is simulated in this demo.</p>
+            <p className="mt-2.5 text-xs text-subtle">Catalogue publication is simulated in this demo.</p>
           </div>
         ) : (
-          <div className="space-y-3">
+          <div className="space-y-4">
             <div>
-              <label htmlFor="reviewer-name" className="mb-1 block text-[13px] font-medium text-slate-800">
+              <label htmlFor="reviewer-name" className="mb-1.5 block text-sm font-medium text-ink-2">
                 Reviewer name
               </label>
               <input
@@ -175,20 +176,20 @@ export default function ReviewPanel(p: ReviewPanelProps) {
                 placeholder="Full name"
                 aria-invalid={fieldErrors.reviewer ? true : undefined}
                 aria-describedby={fieldErrors.reviewer ? "reviewer-error" : undefined}
-                className={`${inputCls} h-9 ${fieldErrors.reviewer ? "border-sev-critical" : "border-slate-300"}`}
+                className={`${inputCls} h-10 ${fieldErrors.reviewer ? "border-sev-critical" : "border-line-strong"}`}
               />
               {fieldErrors.reviewer && (
-                <p id="reviewer-error" className="mt-1 text-xs font-medium text-sev-critical">
+                <p id="reviewer-error" className="mt-1.5 text-[13px] font-medium text-sev-critical">
                   {fieldErrors.reviewer}
                 </p>
               )}
             </div>
             <div>
-              <div className="mb-1 flex items-baseline justify-between">
-                <label htmlFor="review-comment" className="text-[13px] font-medium text-slate-800">
+              <div className="mb-1.5 flex items-baseline justify-between gap-2">
+                <label htmlFor="review-comment" className="text-sm font-medium text-ink-2">
                   Comment
                 </label>
-                <span className="text-xs text-slate-500">Required to reject</span>
+                <span className="text-xs text-subtle">Required to reject</span>
               </div>
               <textarea
                 id="review-comment"
@@ -199,10 +200,10 @@ export default function ReviewPanel(p: ReviewPanelProps) {
                 placeholder={p.decision === "conditional" ? "Rationale for accepting or rejecting the residual risk" : "Optional note"}
                 aria-invalid={fieldErrors.comment ? true : undefined}
                 aria-describedby={fieldErrors.comment ? "comment-error" : undefined}
-                className={`${inputCls} resize-y py-2 leading-5 ${fieldErrors.comment ? "border-sev-critical" : "border-slate-300"}`}
+                className={`${inputCls} resize-y py-2.5 leading-5 ${fieldErrors.comment ? "border-sev-critical" : "border-line-strong"}`}
               />
               {fieldErrors.comment && (
-                <p id="comment-error" className="mt-1 text-xs font-medium text-sev-critical">
+                <p id="comment-error" className="mt-1.5 text-[13px] font-medium text-sev-critical">
                   {fieldErrors.comment}
                 </p>
               )}
@@ -223,12 +224,12 @@ export default function ReviewPanel(p: ReviewPanelProps) {
               </button>
             </div>
             {isBlocked && (
-              <p className="text-xs leading-5 text-slate-500">
+              <p className="text-[13px] leading-5 text-subtle">
                 Blocked submissions cannot be approved. The owner must resolve the blocking findings and resubmit.
               </p>
             )}
 
-            <div className="border-t border-slate-200 pt-3">
+            <div className="border-t border-line pt-4">
               <button
                 type="button"
                 onClick={() => run("publish")}
@@ -238,7 +239,7 @@ export default function ReviewPanel(p: ReviewPanelProps) {
                 {busy === "publish" && <SpinnerIcon size={14} />}
                 Publish to Azure AI catalogue
               </button>
-              <p className="mt-1.5 text-xs leading-5 text-slate-500">
+              <p className="mt-2 text-[13px] leading-5 text-subtle">
                 {p.reviewStatus === "approved" ? "Creates the catalogue entry with this report attached." : "Available after reviewer approval."}
               </p>
             </div>
@@ -246,11 +247,11 @@ export default function ReviewPanel(p: ReviewPanelProps) {
         )}
 
         {error && (
-          <p className="mt-3 rounded-md border border-sev-critical/30 bg-sev-critical-soft px-3 py-2 text-[13px] text-sev-critical" role="alert">
+          <p className="mt-4 rounded-lg border border-[#FDA29B] bg-sev-critical-soft px-3.5 py-2.5 text-sm text-sev-critical" role="alert">
             {error}
           </p>
         )}
-        <p className={notice && !error ? "mt-3 text-xs font-medium text-ok" : "sr-only"} aria-live="polite">
+        <p className={notice && !error ? "mt-4 text-[13px] font-medium text-ok" : "sr-only"} aria-live="polite">
           {notice && !error ? notice : ""}
         </p>
       </div>
