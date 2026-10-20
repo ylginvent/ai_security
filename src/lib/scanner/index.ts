@@ -8,6 +8,7 @@ import { scanDependencies } from "./dependencies";
 import { scanModels } from "./models";
 import { scanSecrets } from "./secrets";
 import { scanSkills } from "./skills";
+import { applySuppressions } from "./suppress";
 
 export interface ScanOutput {
   findings: Finding[];
@@ -18,7 +19,7 @@ export interface ScanOutput {
   skills: SkillReview[];
 }
 
-export const ENGINE_VERSION = "2026.10.0";
+export const ENGINE_VERSION = "2026.10.1";
 
 interface ScannerDef {
   id: Exclude<ScannerId, "questionnaire">;
@@ -112,16 +113,24 @@ export async function scanArchive(fileName: string, data: Uint8Array): Promise<S
   const deps = await depsPromise;
   results.set("dependencies", deps);
 
-  const all: RawFinding[] = [];
+  const raw: RawFinding[] = [];
+  for (const def of SCANNERS) {
+    const t = results.get(def.id);
+    if (t) raw.push(...t.result.findings.filter((f) => f.scanner === def.id));
+  }
+  // .aigateignore, inline-uitzonderingen en test/demo-code: afwaarderen naar info, niet verbergen
+  const suppression = applySuppressions(archive, raw);
+  const all = suppression.findings;
+
   const scanners: ScannerRun[] = SCANNERS.map((def) => {
     const t = results.get(def.id);
-    const findings = t ? t.result.findings.filter((f) => f.scanner === def.id) : [];
-    all.push(...findings);
+    const findings = all.filter((f) => f.scanner === def.id);
     const notes: string[] = [];
     if (t?.error) notes.push(`Scanner failed: ${t.error}`);
     if (t?.result.note) notes.push(t.result.note);
-    // Archief-notities (overgeslagen mappen, limieten) bij de eerste scanner tonen
+    // Archief-notities (overgeslagen mappen, limieten) en uitzonderingen bij de eerste scanner tonen
     if (def.id === "secrets" && archive.notes.length) notes.push(`Archive: ${archive.notes.join(" ")}`);
+    if (def.id === "secrets" && suppression.note) notes.push(`Exceptions: ${suppression.note}`);
     const run: ScannerRun = {
       id: def.id,
       name: def.name,

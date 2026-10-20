@@ -151,11 +151,11 @@ const NON_BLOCKING = [
 ];
 
 const WEIGHTS = [
-  { sev: "Critical", w: "30", cls: "bg-sev-critical" },
-  { sev: "High", w: "12", cls: "bg-sev-high" },
-  { sev: "Medium", w: "5", cls: "bg-sev-medium" },
-  { sev: "Low", w: "1.5", cls: "bg-sev-low" },
-  { sev: "Info", w: "0", cls: "bg-sev-info" },
+  { sev: "Critical", w: "× 0.70", cls: "bg-sev-critical" },
+  { sev: "High", w: "× 0.88", cls: "bg-sev-high" },
+  { sev: "Medium", w: "× 0.96", cls: "bg-sev-medium" },
+  { sev: "Low", w: "× 0.99", cls: "bg-sev-low" },
+  { sev: "Info / suppressed", w: "× 1", cls: "bg-sev-info" },
 ];
 
 function Coverage({ on, label }: { on: boolean; label: string }) {
@@ -454,7 +454,7 @@ export default function MethodologyPage() {
           <Section
             id="scoring"
             title="Trust score"
-            description="Starts at 100 and subtracts a weight per finding. At most three hits per rule are counted, so one pattern repeated across many files cannot dominate the score."
+            description="Starts at 100. Each distinct rule that fires multiplies the score by a factor for its severity; repeats of the same rule count for a quarter each (up to four). Ten different problems weigh more than one problem repeated ten times, and the score never collapses to zero after a couple of findings."
           >
             <div className="grid gap-6 px-4 py-4 sm:px-5 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
               <TableScroll>
@@ -462,7 +462,7 @@ export default function MethodologyPage() {
                   <thead className="border-b border-line">
                     <tr>
                       <th scope="col" className="py-2 pr-3 text-left text-[11px] font-medium uppercase tracking-[0.06em] text-subtle">Severity</th>
-                      <th scope="col" className="py-2 text-right text-[11px] font-medium uppercase tracking-[0.06em] text-subtle">Points per finding</th>
+                      <th scope="col" className="py-2 text-right text-[11px] font-medium uppercase tracking-[0.06em] text-subtle">Factor per rule</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-line">
@@ -474,7 +474,7 @@ export default function MethodologyPage() {
                             {w.sev}
                           </span>
                         </td>
-                        <td className="tabular py-2 text-right font-mono text-ink">−{w.w}</td>
+                        <td className="tabular py-2 text-right font-mono text-ink">{w.w}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -482,11 +482,19 @@ export default function MethodologyPage() {
               </TableScroll>
               <div className="space-y-3 text-[13px] leading-5 text-muted">
                 <p className="rounded-md border border-line bg-surface-2 px-3 py-2 font-mono text-xs text-ink-2">
-                  score = max(0, 100 − Σ weight × min(hits per rule, 3))
+                  score = 100 × Π factor<sup>1 + 0.25 × min(repeats, 4)</sup> per rule
                 </p>
                 <p>
                   The pass threshold is <span className="tabular font-semibold text-ink">{PASS_SCORE}</span>. One critical finding already fails the
                   blocking gate regardless of the score; the score separates assets with a few minor findings from assets with many.
+                </p>
+                <p>
+                  <span className="font-semibold text-ink">Exceptions.</span> Like Semgrep, Bandit and Gitleaks, the gate honours a{" "}
+                  <code className="font-mono text-xs">.aigateignore</code> file (gitignore-style patterns) and inline markers (
+                  <code className="font-mono text-xs">nosec</code>, <code className="font-mono text-xs">nosemgrep</code>,{" "}
+                  <code className="font-mono text-xs">gitleaks:allow</code>, <code className="font-mono text-xs">aigate:ignore</code>). Findings in test,
+                  example and demo code are treated the same way, except secrets. Suppressed findings stay visible as info, with the reason, so the reviewer
+                  can challenge them.
                 </p>
               </div>
             </div>

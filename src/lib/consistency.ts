@@ -107,7 +107,8 @@ export function consistencyFindings(answers: Answers, findings: Finding[]): Find
   const out: Finding[] = [];
   for (const r of RULES) {
     if (answers[r.question] === undefined || !r.claims(answers)) continue;
-    const hits = findings.filter(r.evidence);
+    // onderdrukte bevindingen (info) tellen niet als bewijs
+    const hits = findings.filter((f) => f.severity !== "info" && r.evidence(f));
     if (!hits.length) continue;
     const first = hits[0];
     const where = hits

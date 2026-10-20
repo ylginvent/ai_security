@@ -1,0 +1,8 @@
+# AI Asset Gate exceptions (gitignore-style patterns).
+# Findings in these paths are downgraded to "info" and stay visible to the reviewer.
+
+# Deliberately vulnerable demo assets, embedded as text
+src/lib/sample.ts
+
+# Detection rules: they contain the patterns they look for
+src/lib/scanner/**

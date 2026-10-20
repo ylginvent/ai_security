@@ -2,9 +2,14 @@ import { aiActTier } from "./questionnaire";
 import type { AiActTier, Answers, Decision, Finding, GateResult, Severity } from "./types";
 import { SEVERITIES } from "./types";
 
-/** Aftrek per bevinding. Per regel tellen maximaal 3 treffers mee, zodat één patroon in 40 bestanden de score niet domineert. */
-const WEIGHT: Record<Severity, number> = { critical: 30, high: 12, medium: 5, low: 1.5, info: 0 };
-const MAX_HITS_PER_RULE = 3;
+/**
+ * Elke unieke regel vermenigvuldigt de score met een factor per severity; herhalingen van dezelfde regel
+ * tellen voor een kwart mee (max. 4 extra). Zo blijft de score onderscheidend: hij zakt niet bij twee
+ * kritieke bevindingen al naar 0, en tien keer hetzelfde probleem weegt minder dan tien verschillende.
+ */
+export const RULE_FACTOR: Record<Severity, number> = { critical: 0.7, high: 0.88, medium: 0.96, low: 0.99, info: 1 };
+const REPEAT_WEIGHT = 0.25;
+const MAX_REPEATS = 4;
 
 /** Minimale score om zonder handmatige review door te mogen. */
 export const PASS_SCORE = 75;
@@ -16,15 +21,18 @@ export function countBySeverity(findings: Finding[]): Record<Severity, number> {
 }
 
 export function trustScore(findings: Finding[]): number {
-  const perRule = new Map<string, number>();
-  let penalty = 0;
+  // per regel: zwaarste severity en aantal treffers
+  const perRule = new Map<string, { factor: number; hits: number }>();
   for (const f of findings) {
+    if (f.severity === "info") continue;
     const key = `${f.scanner}:${f.ruleId}`;
-    const n = (perRule.get(key) ?? 0) + 1;
-    perRule.set(key, n);
-    if (n <= MAX_HITS_PER_RULE) penalty += WEIGHT[f.severity];
+    const cur = perRule.get(key);
+    const factor = RULE_FACTOR[f.severity];
+    perRule.set(key, { factor: Math.min(cur?.factor ?? 1, factor), hits: (cur?.hits ?? 0) + 1 });
   }
-  return Math.max(0, Math.round(100 - penalty));
+  let score = 1;
+  for (const { factor, hits } of perRule.values()) score *= Math.pow(factor, 1 + REPEAT_WEIGHT * Math.min(hits - 1, MAX_REPEATS));
+  return Math.max(0, Math.min(100, Math.round(score * 100)));
 }
 
 export interface Evaluation {
