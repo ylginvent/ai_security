@@ -3,6 +3,7 @@ import Link from "next/link";
 import { Card, InitialsTile, TableScroll, btn, td, th, thead } from "@/components/Card";
 import { DecisionBadge } from "@/components/DecisionBadge";
 import FlowDiagram from "@/components/FlowDiagram";
+import LayerDiagram from "@/components/LayerDiagram";
 import { ArrowRightIcon, PlusIcon, SearchIcon } from "@/components/icons";
 import { ScoreBar } from "@/components/Score";
 import { SeverityCounts } from "@/components/SeverityChip";
@@ -84,11 +85,14 @@ export default async function OverviewPage({ searchParams }: { searchParams: Pro
     <div className="space-y-10">
       <section className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
         <div className="max-w-2xl">
-          <p className="text-sm font-semibold text-brand">Azure AI catalogue · intake</p>
+          <p className="flex flex-wrap items-center gap-2 text-sm font-semibold text-brand">
+            Azure AI catalogue · intake
+            <span className="inline-flex h-6 items-center rounded-full bg-navy px-2.5 text-xs font-semibold text-white">Admin view</span>
+          </p>
           <h1 className="mt-2 text-[32px] font-bold leading-[1.15] tracking-tight text-ink sm:text-[40px]">Get your AI asset ready for the catalogue</h1>
           <p className="mt-3 text-base leading-7 text-muted sm:text-[17px]">
-            Every asset is scanned and checked against a short governance intake before it can be published. You see exactly what to fix, in plain
-            language.
+            Every asset is scanned and checked against a short governance intake before it is uploaded to the Azure AI catalogue. This overview is for
+            admins and reviewers; asset owners only see the questionnaire and their report.
           </p>
         </div>
         <Link href="/submit" className={`${btn.hero} shrink-0`}>
@@ -117,8 +121,8 @@ export default async function OverviewPage({ searchParams }: { searchParams: Pro
               How it works
             </h2>
             <p className="mt-1 text-sm leading-6 text-muted">
-              Choose your path, share the code and get a decision in about a minute. Nothing reaches the catalogue without a security reviewer&apos;s
-              sign-off.
+              The gate is a layer in front of the Azure AI catalogue database. Asset owners choose their path, share the code and get a decision in
+              about a minute; nothing reaches the catalogue without a security reviewer&apos;s sign-off.
             </p>
           </div>
           <Link href="/methodology" className="inline-flex shrink-0 items-center gap-1 text-sm font-semibold text-brand hover:text-brand-strong">
@@ -126,7 +130,9 @@ export default async function OverviewPage({ searchParams }: { searchParams: Pro
             <ArrowRightIcon size={14} />
           </Link>
         </div>
-        <FlowDiagram className="mt-6" />
+        <LayerDiagram className="mt-6" />
+        <h3 className="mt-8 text-[15px] font-semibold text-ink">Inside the gate, step by step</h3>
+        <FlowDiagram className="mt-4" />
       </section>
 
       <Card labelledBy="subs-title">

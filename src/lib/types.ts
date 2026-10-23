@@ -87,6 +87,38 @@ export interface Report {
   engineVersion: string;
   /** Eén review per gevonden SKILL.md (Agent Skills-formaat). Ontbreekt bij oudere rapporten. */
   skills?: SkillReview[];
+  /** Vergelijking met de vorige versie, als deze submission als nieuwe versie is ingediend. */
+  comparison?: Comparison;
+}
+
+/** Compacte kopie van een bevinding uit de vorige versie die nu niet meer meetelt. */
+export interface ComparedFinding {
+  scanner: ScannerId;
+  ruleId: string;
+  severity: Severity;
+  title: string;
+  file?: string;
+  line?: number;
+  /** Nog aanwezig, maar telt niet meer mee (uitzondering, test-/democode of afgewaardeerd naar info). */
+  waived?: boolean;
+}
+
+/** Wat er veranderd is ten opzichte van de vorige versie. Indexen verwijzen naar report.findings van deze versie. */
+export interface Comparison {
+  previousId: string;
+  previousVersion: string | null;
+  previousSubmittedAt: string;
+  previousScore: number | null;
+  previousDecision: Decision | null;
+  previousCounts: Record<Severity, number> | null;
+  previousEngineVersion?: string;
+  /** Opgelost: telde in de vorige versie mee en nu niet meer (afgekapt; zie fixedTotal). */
+  fixed: ComparedFinding[];
+  fixedTotal: number;
+  /** Nieuw: telt nu mee en deed dat in de vorige versie niet. */
+  added: number[];
+  /** Nog open: telde mee en telt nog steeds mee. `was` = ernst in de vorige versie als die anders was. */
+  open: { index: number; was?: Severity }[];
 }
 
 export interface SkillCheck {
@@ -151,6 +183,18 @@ export interface Submission {
   reviewed_at: string | null;
   catalog_status: CatalogStatus;
   published_at: string | null;
+  /** Vorige versie waarvan dit een herindiening is (kolom uit migratie 0003; ontbreekt zonder die migratie). */
+  previous_id?: string | null;
+}
+
+/** Korte verwijzing naar een andere versie van hetzelfde asset. */
+export interface VersionRef {
+  id: string;
+  created_at: string;
+  asset_version: string | null;
+  status: SubmissionStatus;
+  decision: Decision | null;
+  score: number | null;
 }
 
 export interface AuditEvent {

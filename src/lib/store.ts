@@ -1,12 +1,12 @@
 import "server-only";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { readCapped, UpstreamError } from "./server/http";
-import type { AuditEvent, CatalogStatus, ReviewStatus, Submission, SubmissionStatus } from "./types";
+import type { AuditEvent, CatalogStatus, ReviewStatus, Submission, SubmissionStatus, VersionRef } from "./types";
 
 export type NewSubmission = Pick<
   Submission,
   "asset_name" | "asset_version" | "owner_name" | "owner_email" | "business_unit" | "asset_type" | "answers" | "file_name" | "file_size" | "file_path" | "file_sha256"
->;
+> & { previous_id?: string | null };
 
 export interface UploadTarget {
   path: string;
@@ -38,6 +38,8 @@ export interface Store {
   /** Update alleen als de rij nog de verwachte status heeft. Null = iemand anders was eerder (of de rij bestaat niet). */
   updateIf(id: string, expect: UpdateExpectation, patch: Partial<Submission>): Promise<Submission | null>;
   get(id: string): Promise<Submission | null>;
+  /** Nieuwste submission die als nieuwe versie van deze is ingediend (null zonder migratie 0003). */
+  findNewerVersion(id: string): Promise<VersionRef | null>;
   list(limit?: number, opts?: ListOptions): Promise<Submission[]>;
   /** True als er al een submission naar dit opslagpad verwijst (een upload mag maar één keer gescand worden). */
   pathInUse(path: string): Promise<boolean>;
@@ -64,6 +66,9 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STALE_SCAN_MS = 2 * 60 * 1000;
 /** Kolom uit migratie 0002 ontbreekt nog: 42703 (Postgres) of PGRST204 (PostgREST schema cache). */
 const missingColumn = (e: { code?: string } | null) => !!e && (e.code === "42703" || e.code === "PGRST204");
+/** Optionele kolommen uit latere migraties, met de migratie die ze toevoegt. */
+const OPTIONAL_COLUMNS: Record<string, string> = { idempotency_key: "0002_hardening.sql", previous_id: "0003_versions.sql" };
+const VERSION_COLUMNS = "id,created_at,asset_version,status,decision,score";
 const FILE_TIMEOUT_MS = 20_000;
 
 /** Alle kolommen behalve de zware (report, answers) en het interne opslagpad. */
@@ -113,6 +118,11 @@ function normalize(s: Submission): Submission {
   return s;
 }
 
+function normalizeRef(r: VersionRef): VersionRef {
+  if (r.status === "scanning" && Date.now() - Date.parse(r.created_at) > STALE_SCAN_MS) return { ...r, status: "failed" };
+  return r;
+}
+
 /* ------------------------------------------------------------------ Supabase */
 
 function supabaseStore(url: string, secretKey: string, publishableKey: string): Store {
@@ -123,21 +133,25 @@ function supabaseStore(url: string, secretKey: string, publishableKey: string): 
   return {
     kind: "supabase",
     async create(row, opts = {}) {
-      if (opts.idempotencyKey) {
-        const { data, error } = await db
-          .from("submissions")
-          .insert({ ...row, idempotency_key: opts.idempotencyKey })
-          .select()
-          .single();
+      const { previous_id, ...base } = row;
+      const insert: Record<string, unknown> = { ...base };
+      if (opts.idempotencyKey) insert.idempotency_key = opts.idempotencyKey;
+      if (previous_id) insert.previous_id = previous_id;
+      // Ontbreekt een kolom uit een latere migratie, dan zonder die kolom opnieuw proberen (en waarschuwen).
+      for (;;) {
+        const { data, error } = await db.from("submissions").insert(insert).select().single();
         if (!missingColumn(error)) {
           fail("insert submission", error);
           return data as Submission;
         }
-        console.warn("submissions.idempotency_key is missing; run supabase/migrations/0002_hardening.sql");
+        const optional = Object.keys(OPTIONAL_COLUMNS).filter((c) => c in insert);
+        if (optional.length === 0) fail("insert submission", error);
+        const named = optional.filter((c) => error?.message.includes(c));
+        for (const c of named.length ? named : optional) {
+          console.warn(`submissions.${c} is missing; run supabase/migrations/${OPTIONAL_COLUMNS[c]}`);
+          delete insert[c];
+        }
       }
-      const { data, error } = await db.from("submissions").insert(row).select().single();
-      fail("insert submission", error);
-      return data as Submission;
     },
     async findByIdempotencyKey(key) {
       const { data, error } = await db.from("submissions").select("*").eq("idempotency_key", key).limit(1).maybeSingle();
@@ -164,6 +178,19 @@ function supabaseStore(url: string, secretKey: string, publishableKey: string): 
       const { data, error } = await db.from("submissions").select("*").eq("id", id).maybeSingle();
       fail("get submission", error);
       return data ? normalize(data as Submission) : null;
+    },
+    async findNewerVersion(id) {
+      if (!UUID.test(id)) return null;
+      const { data, error } = await db
+        .from("submissions")
+        .select(VERSION_COLUMNS)
+        .eq("previous_id", id)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (missingColumn(error)) return null;
+      fail("find newer version", error);
+      return data ? normalizeRef(data as unknown as VersionRef) : null;
     },
     async list(limit = 100, opts = {}) {
       if (opts.summary) {
@@ -261,6 +288,7 @@ function memoryStore(): Store {
         reviewed_at: null,
         catalog_status: "not_published",
         published_at: null,
+        previous_id: row.previous_id ?? null,
       };
       if (opts.idempotencyKey) {
         if (idem.has(opts.idempotencyKey)) throw new UpstreamError("duplicate idempotency key", "23505");
@@ -292,6 +320,13 @@ function memoryStore(): Store {
     async get(id) {
       const s = mem.subs.get(id);
       return s ? normalize(copy(s)) : null;
+    },
+    async findNewerVersion(id) {
+      let best: Submission | null = null;
+      for (const s of mem.subs.values()) if (s.previous_id === id && (!best || s.created_at > best.created_at)) best = s;
+      if (!best) return null;
+      const { created_at, asset_version, status, decision, score } = best;
+      return normalizeRef({ id: best.id, created_at, asset_version, status, decision, score });
     },
     async list(limit = 100, opts = {}) {
       return [...mem.subs.values()]

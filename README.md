@@ -34,6 +34,12 @@ You can provide the code in three ways: upload a zip, link a public GitHub or Gi
 
 Outputs: an interactive report, a JSON report and a CycloneDX 1.5 SBOM. Reviewer approval, catalogue publication and an append-only audit trail are included.
 
+**Where it sits.** The gate is a layer in front of the upload to the Azure AI catalogue database, not a separate portal. Asset owners only see the questionnaire, the upload and their report; the overview page is an optional admin and reviewer console.
+
+**Grouped findings.** Repeats of the same rule are shown as one card with the number of hits, one shared explanation and one shared fix, with the individual places listed inside (toggle "Combine repeats", or group by issue type).
+
+**New versions.** "Submit a new version" on a report opens the wizard with the previous answers filled in (and the version number bumped). The new report links to the previous one and shows what was fixed, what is new and what is still open, plus the score change. Matching ignores shifting line numbers: findings are paired on rule and file, then on line, code excerpt or title.
+
 ## Stack
 
 - Next.js 16 (App Router), React 19, Tailwind CSS 4, TypeScript
@@ -45,6 +51,7 @@ Outputs: an interactive report, a JSON report and a CycloneDX 1.5 SBOM. Reviewer
 1. Create a Supabase project (EU region) and run the migrations in order in the SQL editor:
    - [`supabase/migrations/0001_init.sql`](supabase/migrations/0001_init.sql)
    - [`supabase/migrations/0002_hardening.sql`](supabase/migrations/0002_hardening.sql): append-only audit trail, idempotency key, database checks on review status. If its unique index on `file_path` fails, an old upload was submitted twice; delete the duplicate row first.
+   - [`supabase/migrations/0003_versions.sql`](supabase/migrations/0003_versions.sql): links a new version to the previous one (`previous_id`). Without it the comparison still works, but an old report does not point to its newer version.
 2. Set the environment variables from [`.env.example`](.env.example) in Vercel (Project → Settings → Environment Variables):
    - `SUPABASE_URL`
    - `SUPABASE_PUBLISHABLE_KEY`, used only to upload files to a one-time signed URL

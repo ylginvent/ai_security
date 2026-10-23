@@ -29,7 +29,31 @@ interface Item {
   sup: SuppressionInfo | null;
   /** Lower-cased text the search box matches against. */
   haystack: string;
+  /** scanner:ruleId — repeats of the same rule are combined into one card. */
+  rule: string;
+  /** Counted now and not in the previous version. */
+  isNew: boolean;
 }
+
+/** One finding on its own row, or several hits of the same rule combined into one card with one shared fix. */
+type Entry =
+  | { type: "single"; key: string; item: Item }
+  | {
+      type: "rule";
+      /** Open-state key (see cardKeyOf). */
+      key: string;
+      /** DOM id of the card. */
+      domId: string;
+      items: Item[];
+      sev: Severity;
+      title: string;
+      description: string;
+      remediation: string;
+      refs: string[];
+      files: number;
+      newCount: number;
+      suppressed: number;
+    };
 
 interface Group {
   key: string;
@@ -38,7 +62,10 @@ interface Group {
   mono: boolean;
   hint: string | null;
   sev: Severity | null;
-  items: Item[];
+  /** No section header (the "Issue type" view is a flat list of rule cards). */
+  headless: boolean;
+  count: number;
+  entries: Entry[];
 }
 
 const SEV_RANK: Record<Severity, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
@@ -48,9 +75,84 @@ const collator = new Intl.Collator("en", { numeric: true, sensitivity: "base" })
 
 const NO_FILE = "\u0000no-file";
 
+/** Occurrences shown in a rule card before "Show all". */
+const OCCURRENCE_LIMIT = 30;
+
 function location(f: Finding): string | null {
   if (!f.file) return null;
   return f.line ? `${f.file}:${f.line}` : f.file;
+}
+
+function sectionKeyOf(f: Finding, groupBy: GroupBy): string {
+  if (groupBy === "severity") return f.severity;
+  if (groupBy === "scanner") return f.scanner;
+  if (groupBy === "file") return f.file ?? NO_FILE;
+  return "all";
+}
+
+/** Open-state key of the rule card a finding belongs to in the current view. */
+function cardKeyOf(f: Finding, groupBy: GroupBy): string {
+  return `card|${sectionKeyOf(f, groupBy)}|${f.scanner}:${f.ruleId}`;
+}
+
+/** Most frequent non-empty value (first one wins a tie). */
+function mostCommon(values: string[]): string {
+  const counts = new Map<string, number>();
+  let best = "";
+  let bestN = 0;
+  for (const v of values) {
+    if (!v) continue;
+    const n = (counts.get(v) ?? 0) + 1;
+    counts.set(v, n);
+    if (n > bestN) {
+      best = v;
+      bestN = n;
+    }
+  }
+  return best;
+}
+
+const describe = (it: Item) => (it.sup ? it.sup.description : it.f.description);
+
+function ruleEntry(key: string, items: Item[]): Entry {
+  let sev: Severity = items[0].f.severity;
+  for (const it of items) if (SEV_RANK[it.f.severity] < SEV_RANK[sev]) sev = it.f.severity;
+  const refs = [...new Set(items.flatMap((it) => it.f.refs))].slice(0, 12);
+  return {
+    type: "rule",
+    key,
+    domId: `${items[0].key}-rule`,
+    items,
+    sev,
+    title: mostCommon(items.map((it) => it.f.title)) || items[0].f.title,
+    description: mostCommon(items.map(describe)),
+    remediation: mostCommon(items.map((it) => it.f.remediation)),
+    refs,
+    files: new Set(items.map((it) => it.f.file ?? NO_FILE)).size,
+    newCount: items.filter((it) => it.isNew).length,
+    suppressed: items.filter((it) => it.sup).length,
+  };
+}
+
+const entryCount = (e: Entry) => (e.type === "rule" ? e.items.length : 1);
+const entrySev = (e: Entry) => (e.type === "rule" ? e.sev : e.item.f.severity);
+const entryTitle = (e: Entry) => (e.type === "rule" ? e.title : e.item.f.title);
+
+function NewTag({ title }: { title?: string }) {
+  return (
+    <span title={title} className="inline-flex h-5 items-center rounded-md bg-sev-high-soft px-1.5 text-[11px] font-semibold text-sev-high-ink ring-1 ring-inset ring-[#F9DBAF]">
+      New
+    </span>
+  );
+}
+
+function SuppressedTag({ sup }: { sup: SuppressionInfo }) {
+  return (
+    <span className="inline-flex h-5 items-center rounded-md bg-white px-1.5 text-[11px] font-semibold text-ink-2 ring-1 ring-inset ring-line-strong">
+      {sup.testCode ? "Test code" : "Suppressed"}
+      {sup.originalSeverity ? ` · was ${SEVERITY_LABEL[sup.originalSeverity]}` : ""}
+    </span>
+  );
 }
 
 const selectCls =
@@ -60,24 +162,33 @@ export default function FindingsExplorer({
   findings,
   scanners,
   incomplete = false,
+  added,
+  previousLabel,
 }: {
   findings: Finding[];
   scanners: { id: ScannerId; label: string }[];
   /** True when a scanner failed, so "no findings" must not read as "clean". */
   incomplete?: boolean;
+  /** Indexes of findings that are new since the previous version (only for a resubmission). */
+  added?: number[];
+  /** "v1.2.0" or "the previous version", for the "New" tags. */
+  previousLabel?: string;
 }) {
-  const items: Item[] = useMemo(
-    () =>
-      findings.map((f, i) => ({
-        f,
-        key: findingAnchor(i),
-        sup: suppressionInfo(f),
-        haystack: [f.title, f.description, f.file ?? "", f.ruleId, f.remediation, f.snippet ?? "", ...f.refs, ...f.refs.map((r) => refInfo(r).meaning ?? "")]
-          .join("\n")
-          .toLowerCase(),
-      })),
-    [findings],
-  );
+  const items: Item[] = useMemo(() => {
+    const isNew = new Set(added ?? []);
+    return findings.map((f, i) => ({
+      f,
+      key: findingAnchor(i),
+      sup: suppressionInfo(f),
+      haystack: [f.title, f.description, f.file ?? "", f.ruleId, f.remediation, f.snippet ?? "", ...f.refs, ...f.refs.map((r) => refInfo(r).meaning ?? "")]
+        .join("\n")
+        .toLowerCase(),
+      rule: `${f.scanner}:${f.ruleId}`,
+      isNew: isNew.has(i),
+    }));
+  }, [findings, added]);
+  const newTitle = previousLabel ? `New since ${previousLabel}` : undefined;
+  const newCount = added?.length ?? 0;
   const scannerLabel = useMemo(() => {
     const m = new Map<string, string>();
     for (const s of scanners) m.set(s.id, s.label);
@@ -89,7 +200,11 @@ export default function FindingsExplorer({
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query);
   const [hideSuppressed, setHideSuppressed] = useState(false);
+  const [onlyNew, setOnlyNew] = useState(false);
   const [groupBy, setGroupBy] = useState<GroupBy>("severity");
+  /** Combine repeats of the same rule into one card (always on in the "Issue type" view). */
+  const [combine, setCombine] = useState(true);
+  const merge = combine || groupBy === "rule";
   const [open, setOpen] = useState<Set<string>>(() => new Set());
   /** True while the browser prints: every finding's details are rendered. */
   const [printing, setPrinting] = useState(false);
@@ -106,9 +221,10 @@ export default function FindingsExplorer({
     return items.filter((it) => {
       if (scanner !== "all" && it.f.scanner !== scanner) return false;
       if (hideSuppressed && it.sup) return false;
+      if (onlyNew && !it.isNew) return false;
       return !q || it.haystack.includes(q);
     });
-  }, [items, scanner, deferredQuery, hideSuppressed]);
+  }, [items, scanner, deferredQuery, hideSuppressed, onlyNew]);
 
   const sevCounts = useMemo(() => {
     const c = Object.fromEntries(SEVERITIES.map((s) => [s, 0])) as Record<Severity, number>;
@@ -132,36 +248,51 @@ export default function FindingsExplorer({
   }, [base, sev, groupBy]);
 
   const groups = useMemo((): Group[] => {
-    const map = new Map<string, Group>();
+    const map = new Map<string, { g: Group; buckets: Map<string, Item[]> }>();
     for (const it of visible) {
       const f = it.f;
-      let key: string;
-      if (groupBy === "severity") key = f.severity;
-      else if (groupBy === "scanner") key = f.scanner;
-      else if (groupBy === "file") key = f.file ?? NO_FILE;
-      else key = `${f.scanner}:${f.ruleId}`;
-      let g = map.get(key);
-      if (!g) {
+      const key = sectionKeyOf(f, groupBy);
+      let slot = map.get(key);
+      if (!slot) {
         const sLabel = scannerLabel.get(f.scanner) ?? f.scanner;
-        if (groupBy === "severity") g = { key, label: SEVERITY_LABEL[f.severity], mono: false, hint: SEVERITY_MEANING[f.severity], sev: f.severity, items: [] };
-        else if (groupBy === "scanner") g = { key, label: sLabel, mono: false, hint: SCANNER_HELP[f.scanner] ?? null, sev: null, items: [] };
+        const shell = { key, headless: false, count: 0, entries: [] as Entry[] };
+        let g: Group;
+        if (groupBy === "severity") g = { ...shell, label: SEVERITY_LABEL[f.severity], mono: false, hint: SEVERITY_MEANING[f.severity], sev: f.severity };
+        else if (groupBy === "scanner") g = { ...shell, label: sLabel, mono: false, hint: SCANNER_HELP[f.scanner] ?? null, sev: null };
         else if (groupBy === "file")
           g = f.file
-            ? { key, label: f.file, mono: true, hint: null, sev: f.severity, items: [] }
-            : { key, label: "Not tied to a file", mono: false, hint: "Questionnaire answers and project-wide findings.", sev: f.severity, items: [] };
-        else g = { key, label: f.title, mono: false, hint: `${sLabel} · rule ${f.ruleId}`, sev: f.severity, items: [] };
-        map.set(key, g);
+            ? { ...shell, label: f.file, mono: true, hint: null, sev: f.severity }
+            : { ...shell, label: "Not tied to a file", mono: false, hint: "Questionnaire answers and project-wide findings.", sev: f.severity };
+        else g = { ...shell, label: "", mono: false, hint: null, sev: null, headless: true };
+        slot = { g, buckets: new Map() };
+        map.set(key, slot);
       }
-      if (g.sev && SEV_RANK[f.severity] < SEV_RANK[g.sev]) g.sev = f.severity;
-      g.items.push(it);
+      if (slot.g.sev && SEV_RANK[f.severity] < SEV_RANK[slot.g.sev]) slot.g.sev = f.severity;
+      slot.g.count++;
+      const bucket = merge ? it.rule : it.key;
+      const list = slot.buckets.get(bucket);
+      if (list) list.push(it);
+      else slot.buckets.set(bucket, [it]);
     }
-    const out = [...map.values()];
+    const out = [...map.values()].map(({ g, buckets }) => {
+      const entries: Entry[] = [...buckets.values()].map((list): Entry =>
+        list.length === 1 ? { type: "single", key: list[0].key, item: list[0] } : ruleEntry(cardKeyOf(list[0].f, groupBy), list),
+      );
+      // In a file, keep line order; elsewhere the worst and most frequent issues first.
+      if (groupBy !== "file") {
+        entries.sort(
+          (a, b) => SEV_RANK[entrySev(a)] - SEV_RANK[entrySev(b)] || entryCount(b) - entryCount(a) || collator.compare(entryTitle(a), entryTitle(b)),
+        );
+      }
+      return { ...g, entries };
+    });
     if (groupBy === "severity") return out.sort((a, b) => SEV_RANK[a.key as Severity] - SEV_RANK[b.key as Severity]);
     if (groupBy === "scanner") return out.sort((a, b) => collator.compare(a.label, b.label));
-    if (groupBy === "file") return out; // already in path order (no-file group last)
-    // rule: worst first, then the rules that fire most often
-    return out.sort((a, b) => SEV_RANK[a.sev ?? "info"] - SEV_RANK[b.sev ?? "info"] || b.items.length - a.items.length || collator.compare(a.label, b.label));
-  }, [visible, groupBy, scannerLabel]);
+    return out; // file: already in path order (no-file group last); rule: one flat list
+  }, [visible, groupBy, scannerLabel, merge]);
+
+  const entries = useMemo(() => groups.flatMap((g) => g.entries), [groups]);
+  const issueCount = entries.length;
 
   const scannerCounts = useMemo(() => {
     const m = new Map<string, number>();
@@ -171,8 +302,8 @@ export default function FindingsExplorer({
 
   const visibleKeys = useMemo(() => new Set(visible.map((v) => v.key)), [visible]);
 
-  const allOpen = visible.length > 0 && visible.every((it) => open.has(it.key));
-  const filtersActive = sev !== "all" || scanner !== "all" || query.trim() !== "" || hideSuppressed;
+  const allOpen = entries.length > 0 && entries.every((e) => open.has(e.key));
+  const filtersActive = sev !== "all" || scanner !== "all" || query.trim() !== "" || hideSuppressed || onlyNew;
 
   const toggle = useCallback((key: string) => {
     setOpen((prev) => {
@@ -183,13 +314,14 @@ export default function FindingsExplorer({
     });
   }, []);
   function setAll(expand: boolean) {
-    setOpen(expand ? new Set(visible.map((v) => v.key)) : new Set());
+    setOpen(expand ? new Set(entries.map((e) => e.key)) : new Set());
   }
   function reset() {
     setSev("all");
     setScanner("all");
     setQuery("");
     setHideSuppressed(false);
+    setOnlyNew(false);
   }
 
   /** Expand a finding (by index in `findings`), clearing filters that hide it, then scroll to it. */
@@ -202,16 +334,21 @@ export default function FindingsExplorer({
         setScanner("all");
         setQuery("");
         setHideSuppressed(false);
+        setOnlyNew(false);
       }
+      // Inside a rule card: open the card (and its full occurrence list) as well as the occurrence itself.
+      const card = cardKeyOf(it.f, groupBy);
       setOpen((prev) => {
-        if (prev.has(it.key)) return prev;
+        if (prev.has(it.key) && prev.has(card) && prev.has(`${card}|all`)) return prev;
         const next = new Set(prev);
         next.add(it.key);
+        next.add(card);
+        next.add(`${card}|all`);
         return next;
       });
       setTarget(it.key);
     },
-    [items, visibleKeys],
+    [items, visibleKeys, groupBy],
   );
 
   // "Fix first" links in the hero dispatch REVEAL_EVENT; plain hash changes work too.
@@ -312,12 +449,12 @@ export default function FindingsExplorer({
               <span className="whitespace-nowrap">Group by</span>
               <select value={groupBy} onChange={(e) => setGroupBy(e.target.value as GroupBy)} className={selectCls}>
                 <option value="severity">Severity</option>
-                <option value="file">File</option>
                 <option value="rule">Issue type (rule)</option>
+                <option value="file">File</option>
                 <option value="scanner">Scanner</option>
               </select>
             </label>
-            <button type="button" onClick={() => setAll(!allOpen)} className={btn.secondary} disabled={visible.length === 0}>
+            <button type="button" onClick={() => setAll(!allOpen)} className={btn.secondary} disabled={entries.length === 0}>
               <ChevronDownIcon size={16} className={`transition-transform ${allOpen ? "rotate-180" : ""}`} />
               {allOpen ? "Collapse all" : "Expand all"}
             </button>
@@ -389,17 +526,31 @@ export default function FindingsExplorer({
               </p>
             </div>
           </details>
-          {suppressedCount > 0 && (
-            <label className="inline-flex shrink-0 items-center gap-2 text-[13px] font-medium text-ink-2">
-              <input
-                type="checkbox"
-                checked={hideSuppressed}
-                onChange={(e) => setHideSuppressed(e.target.checked)}
-                className="size-4 rounded border-line-strong accent-brand"
-              />
-              Hide {suppressedCount} suppressed
-            </label>
-          )}
+          <div className="flex shrink-0 flex-wrap items-center gap-x-5 gap-y-2">
+            {groupBy !== "rule" && (
+              <label className="inline-flex items-center gap-2 text-[13px] font-medium text-ink-2" title="Show repeats of the same rule as one card with one shared fix">
+                <input type="checkbox" checked={combine} onChange={(e) => setCombine(e.target.checked)} className="size-4 rounded border-line-strong accent-brand" />
+                Combine repeats
+              </label>
+            )}
+            {newCount > 0 && (
+              <label className="inline-flex items-center gap-2 text-[13px] font-medium text-ink-2">
+                <input type="checkbox" checked={onlyNew} onChange={(e) => setOnlyNew(e.target.checked)} className="size-4 rounded border-line-strong accent-brand" />
+                Only {newCount} new{previousLabel ? ` since ${previousLabel}` : ""}
+              </label>
+            )}
+            {suppressedCount > 0 && (
+              <label className="inline-flex items-center gap-2 text-[13px] font-medium text-ink-2">
+                <input
+                  type="checkbox"
+                  checked={hideSuppressed}
+                  onChange={(e) => setHideSuppressed(e.target.checked)}
+                  className="size-4 rounded border-line-strong accent-brand"
+                />
+                Hide {suppressedCount} suppressed
+              </label>
+            )}
+          </div>
         </div>
       </div>
 
@@ -416,10 +567,17 @@ export default function FindingsExplorer({
       <div className="flex flex-wrap items-center justify-between gap-2 px-5 py-3 text-[13px] text-subtle sm:px-6 print:hidden">
         <p aria-live="polite" aria-busy={searching}>
           Showing <span className="tabular font-semibold text-ink-2">{visible.length}</span> of <span className="tabular">{items.length}</span> findings
-          {groupBy !== "severity" && groups.length > 0 && (
+          {issueCount < visible.length && (
             <>
               {" "}
-              in <span className="tabular">{groups.length}</span> {groupBy === "file" ? (groups.length === 1 ? "file" : "files") : "groups"}
+              as <span className="tabular font-semibold text-ink-2">{issueCount}</span> {issueCount === 1 ? "issue" : "issues"}
+            </>
+          )}
+          {(groupBy === "file" || groupBy === "scanner") && groups.length > 0 && (
+            <>
+              {" "}
+              in <span className="tabular">{groups.length}</span>{" "}
+              {groupBy === "file" ? (groups.length === 1 ? "file" : "files") : groups.length === 1 ? "scanner" : "scanners"}
             </>
           )}
         </p>
@@ -441,6 +599,36 @@ export default function FindingsExplorer({
         <div className="overflow-hidden rounded-b-xl border-t border-line">
           {groups.map((g, gi) => {
             const headingId = `findings-group-${gi}`;
+            const list = (
+              <ul>
+                {g.entries.map((e) =>
+                  e.type === "single" ? (
+                    <FindingRow
+                      key={e.key}
+                      item={e.item}
+                      open={open.has(e.key)}
+                      printing={printing}
+                      flash={flash === e.key}
+                      onToggle={toggle}
+                      scannerLabel={scannerLabel.get(e.item.f.scanner) ?? e.item.f.scanner}
+                      newTitle={newTitle}
+                    />
+                  ) : (
+                    <RuleCard
+                      key={e.key}
+                      entry={e}
+                      openKeys={open}
+                      printing={printing}
+                      flash={flash}
+                      onToggle={toggle}
+                      scannerLabel={scannerLabel.get(e.items[0].f.scanner) ?? e.items[0].f.scanner}
+                      newTitle={newTitle}
+                    />
+                  ),
+                )}
+              </ul>
+            );
+            if (g.headless) return <div key={g.key}>{list}</div>;
             return (
               <section key={g.key} aria-labelledby={headingId}>
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 border-b border-line bg-surface-2 px-5 py-2.5 sm:px-6">
@@ -448,25 +636,13 @@ export default function FindingsExplorer({
                     {g.sev && <span className={`size-2 shrink-0 rounded-full ${SEV_BG[g.sev]}`} aria-hidden="true" />}
                     <span className={`min-w-0 break-all ${g.mono ? "font-mono font-medium" : ""}`}>{g.label}</span>
                     <span className="tabular shrink-0 rounded-full bg-white px-1.5 font-medium text-subtle ring-1 ring-inset ring-line">
-                      {g.items.length}
-                      <span className="sr-only"> {g.items.length === 1 ? "finding" : "findings"}</span>
+                      {g.count}
+                      <span className="sr-only"> {g.count === 1 ? "finding" : "findings"}</span>
                     </span>
                   </h3>
                   {g.hint && <span className="min-w-0 text-xs text-subtle">{g.hint}</span>}
                 </div>
-                <ul>
-                  {g.items.map((it) => (
-                    <FindingRow
-                      key={it.key}
-                      item={it}
-                      open={open.has(it.key)}
-                      printing={printing}
-                      flash={flash === it.key}
-                      onToggle={toggle}
-                      scannerLabel={scannerLabel.get(it.f.scanner) ?? it.f.scanner}
-                    />
-                  ))}
-                </ul>
+                {list}
               </section>
             );
           })}
@@ -539,6 +715,7 @@ const FindingRow = memo(function FindingRow({
   flash,
   onToggle,
   scannerLabel,
+  newTitle,
 }: {
   item: Item;
   open: boolean;
@@ -546,6 +723,7 @@ const FindingRow = memo(function FindingRow({
   flash: boolean;
   onToggle: (key: string) => void;
   scannerLabel: string;
+  newTitle?: string;
 }) {
   const { f, key, sup } = item;
   const loc = location(f);
@@ -565,12 +743,8 @@ const FindingRow = memo(function FindingRow({
         <span className="min-w-0 flex-1">
           <span className="block break-words text-sm font-medium leading-5 text-ink">{f.title}</span>
           <span className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-subtle">
-            {sup && (
-              <span className="inline-flex h-5 items-center rounded-md bg-white px-1.5 text-[11px] font-semibold text-ink-2 ring-1 ring-inset ring-line-strong">
-                {sup.testCode ? "Test code" : "Suppressed"}
-                {sup.originalSeverity ? ` · was ${SEVERITY_LABEL[sup.originalSeverity]}` : ""}
-              </span>
-            )}
+            {item.isNew && <NewTag title={newTitle} />}
+            {sup && <SuppressedTag sup={sup} />}
             <span className="whitespace-nowrap">{scannerLabel}</span>
             <span aria-hidden="true" className="text-faint">
               ·
@@ -605,18 +779,7 @@ function FindingDetails({ f, sup, loc, scannerLabel }: { f: Finding; sup: Suppre
         </p>
       </div>
 
-      {sup && (
-        <div className="rounded-lg border border-line-strong bg-surface-2 px-4 py-3 text-[13px] leading-5">
-          <div className="font-semibold text-ink">
-            {sup.testCode ? "Not counted: this is test, example or demo code" : "Not counted: marked as an exception"}
-          </div>
-          <p className="mt-1 text-ink-2">
-            {sup.reason ? `${sup.reason} ` : ""}
-            {sup.originalSeverity ? `Without the exception this would be ${SEVERITY_LABEL[sup.originalSeverity].toLowerCase()} severity. ` : ""}A
-            reviewer checks that the exception is justified. If this code ships with the asset, fix it anyway.
-          </p>
-        </div>
-      )}
+      {sup && <SuppressionNote sup={sup} />}
 
       {(loc || f.snippet) && (
         <div>
@@ -646,39 +809,7 @@ function FindingDetails({ f, sup, loc, scannerLabel }: { f: Finding; sup: Suppre
         </div>
       )}
 
-      {refs.length > 0 && (
-        <div>
-          <DetailHeading>Learn more</DetailHeading>
-          <ul className="mt-1.5 flex flex-wrap gap-2">
-            {refs.map((r, i) => {
-              const info = refInfo(r);
-              const cls = "inline-flex min-h-7 max-w-full items-center gap-1.5 rounded-full border border-line bg-white px-2.5 py-1 text-xs font-medium text-ink-2";
-              const body = (
-                <>
-                  {info.meaning && <span className="text-ink">{info.meaning}</span>}
-                  <span className={`break-all ${info.meaning ? "text-subtle" : ""}`}>{info.id}</span>
-                </>
-              );
-              return (
-                <li key={`${r}-${i}`} className="max-w-full">
-                  {info.href ? (
-                    <a href={info.href} target="_blank" rel="noopener noreferrer" title={info.kind} className={`${cls} transition-colors hover:border-brand hover:text-brand`}>
-                      {body}
-                      <ExternalLinkIcon size={12} className="shrink-0 print:hidden" />
-                      <span className="sr-only">({info.kind}, opens in a new tab)</span>
-                    </a>
-                  ) : (
-                    <span className={cls} title={info.kind}>
-                      {body}
-                      <span className="sr-only">({info.kind})</span>
-                    </span>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-      )}
+      <RefList refs={refs} />
 
       <p className="text-xs leading-5 text-subtle">
         Found by {scannerLabel} · rule <span className="break-all font-mono">{f.ruleId}</span>
@@ -686,3 +817,267 @@ function FindingDetails({ f, sup, loc, scannerLabel }: { f: Finding; sup: Suppre
     </div>
   );
 }
+
+function SuppressionNote({ sup }: { sup: SuppressionInfo }) {
+  return (
+    <div className="rounded-lg border border-line-strong bg-surface-2 px-4 py-3 text-[13px] leading-5">
+      <div className="font-semibold text-ink">{sup.testCode ? "Not counted: this is test, example or demo code" : "Not counted: marked as an exception"}</div>
+      <p className="mt-1 text-ink-2">
+        {sup.reason ? `${sup.reason} ` : ""}
+        {sup.originalSeverity ? `Without the exception this would be ${SEVERITY_LABEL[sup.originalSeverity].toLowerCase()} severity. ` : ""}A reviewer
+        checks that the exception is justified. If this code ships with the asset, fix it anyway.
+      </p>
+    </div>
+  );
+}
+
+function RefList({ refs }: { refs: string[] }) {
+  const list = refs.filter((r) => r.trim() && r.trim().toLowerCase() !== SUPPRESSED_REF);
+  if (list.length === 0) return null;
+  return (
+    <div>
+      <DetailHeading>Learn more</DetailHeading>
+      <ul className="mt-1.5 flex flex-wrap gap-2">
+        {list.map((r, i) => {
+          const info = refInfo(r);
+          const cls = "inline-flex min-h-7 max-w-full items-center gap-1.5 rounded-full border border-line bg-white px-2.5 py-1 text-xs font-medium text-ink-2";
+          const body = (
+            <>
+              {info.meaning && <span className="text-ink">{info.meaning}</span>}
+              <span className={`break-all ${info.meaning ? "text-subtle" : ""}`}>{info.id}</span>
+            </>
+          );
+          return (
+            <li key={`${r}-${i}`} className="max-w-full">
+              {info.href ? (
+                <a href={info.href} target="_blank" rel="noopener noreferrer" title={info.kind} className={`${cls} transition-colors hover:border-brand hover:text-brand`}>
+                  {body}
+                  <ExternalLinkIcon size={12} className="shrink-0 print:hidden" />
+                  <span className="sr-only">({info.kind}, opens in a new tab)</span>
+                </a>
+              ) : (
+                <span className={cls} title={info.kind}>
+                  {body}
+                  <span className="sr-only">({info.kind})</span>
+                </span>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ rule cards */
+
+/** Several hits of one rule as one card: count, shared explanation, one shared fix, then the list of places. */
+function RuleCard({
+  entry,
+  openKeys,
+  printing,
+  flash,
+  onToggle,
+  scannerLabel,
+  newTitle,
+}: {
+  entry: Extract<Entry, { type: "rule" }>;
+  openKeys: Set<string>;
+  printing: boolean;
+  flash: string | null;
+  onToggle: (key: string) => void;
+  scannerLabel: string;
+  newTitle?: string;
+}) {
+  const { key, domId, items, sev, title, description, remediation, refs, files, newCount, suppressed } = entry;
+  const open = openKeys.has(key);
+  const showAll = printing || openKeys.has(`${key}|all`) || items.length <= OCCURRENCE_LIMIT;
+  const shown = showAll ? items : items.slice(0, OCCURRENCE_LIMIT);
+  const panelId = `${domId}-details`;
+  const n = items.length;
+  const ruleId = items[0].f.ruleId;
+  const fileText = files > 1 ? `${files} files` : items[0].f.file ? shortPath(items[0].f.file, 40) : null;
+  return (
+    <li id={domId} className="scroll-mt-24 border-b border-line last:border-b-0">
+      <button
+        type="button"
+        onClick={() => onToggle(key)}
+        aria-expanded={open}
+        aria-controls={panelId}
+        className={`flex w-full items-start gap-3 px-5 py-4 text-left transition-colors focus-visible:-outline-offset-2 sm:items-center sm:gap-4 sm:px-6 ${
+          open ? "bg-surface-2/60" : "hover:bg-surface-2"
+        }`}
+      >
+        <SeverityChip severity={sev} className="mt-px w-[88px] justify-start sm:mt-0" />
+        <span className="min-w-0 flex-1">
+          <span className="block break-words text-sm font-medium leading-5 text-ink">{title}</span>
+          <span className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-subtle">
+            {newCount > 0 && (
+              <span title={newTitle} className="inline-flex h-5 items-center rounded-md bg-sev-high-soft px-1.5 text-[11px] font-semibold text-sev-high-ink ring-1 ring-inset ring-[#F9DBAF]">
+                {newCount === n ? "New" : `${newCount} new`}
+              </span>
+            )}
+            {suppressed > 0 && (
+              <span className="inline-flex h-5 items-center rounded-md bg-white px-1.5 text-[11px] font-semibold text-ink-2 ring-1 ring-inset ring-line-strong">
+                {suppressed === n ? "Suppressed" : `${suppressed} suppressed`}
+              </span>
+            )}
+            <span className="whitespace-nowrap">{scannerLabel}</span>
+            {fileText && (
+              <>
+                <span aria-hidden="true" className="text-faint">
+                  ·
+                </span>
+                <span className={files > 1 ? "whitespace-nowrap" : "min-w-0 break-all font-mono text-xs text-muted"}>{fileText}</span>
+              </>
+            )}
+          </span>
+        </span>
+        <span
+          className="tabular mt-0.5 inline-flex h-6 shrink-0 items-center rounded-full bg-white px-2 text-xs font-semibold text-ink-2 ring-1 ring-inset ring-line-strong sm:mt-0"
+          title={`${n} occurrences of the same issue`}
+        >
+          {n}×<span className="sr-only"> occurrences</span>
+        </span>
+        <ChevronDownIcon size={18} className={`mt-0.5 shrink-0 text-subtle transition-transform sm:mt-0 print:hidden ${open ? "rotate-180" : ""}`} />
+      </button>
+      <div id={panelId} className={`${open ? "block" : "hidden print:block"} px-5 pb-5 sm:pl-[128px] sm:pr-6`}>
+        {(open || printing) && (
+          <div className="space-y-4 text-sm leading-6 text-ink-2">
+            <div>
+              <DetailHeading>What we found</DetailHeading>
+              <p className="mt-1 whitespace-pre-line break-words">{description}</p>
+              <p className={`mt-1.5 text-[13px] leading-5 ${SEV_TEXT[sev]}`}>
+                <span className="font-semibold">{SEVERITY_LABEL[sev]}:</span> <span className="text-muted">{SEVERITY_MEANING[sev]}</span>
+              </p>
+            </div>
+
+            {remediation && (
+              <div className="rounded-lg border border-brand/20 bg-brand-soft px-4 py-3">
+                <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+                  <DetailHeading>How to fix</DetailHeading>
+                  <span className="text-xs font-medium text-brand-strong">One fix for all {n} occurrences</span>
+                </div>
+                <p className="mt-1 whitespace-pre-line break-words text-ink">{remediation}</p>
+              </div>
+            )}
+
+            <div>
+              <DetailHeading>{`Where (${n} ${n === 1 ? "place" : "places"}${files > 1 ? ` in ${files} files` : ""})`}</DetailHeading>
+              <ul className="mt-1.5 overflow-hidden rounded-lg border border-line">
+                {shown.map((it) => (
+                  <OccurrenceRow
+                    key={it.key}
+                    item={it}
+                    open={openKeys.has(it.key)}
+                    printing={printing}
+                    flash={flash === it.key}
+                    onToggle={onToggle}
+                    cardSev={sev}
+                    cardTitle={title}
+                    cardDescription={description}
+                    cardRemediation={remediation}
+                    newTitle={newTitle}
+                  />
+                ))}
+              </ul>
+              {!showAll && (
+                <button type="button" onClick={() => onToggle(`${key}|all`)} className="mt-2 text-[13px] font-semibold text-brand hover:text-brand-strong">
+                  Show all {n} places
+                </button>
+              )}
+            </div>
+
+            <RefList refs={refs} />
+
+            <p className="text-xs leading-5 text-subtle">
+              Found by {scannerLabel} · rule <span className="break-all font-mono">{ruleId}</span>
+            </p>
+          </div>
+        )}
+      </div>
+    </li>
+  );
+}
+
+const OccurrenceRow = memo(function OccurrenceRow({
+  item,
+  open,
+  printing,
+  flash,
+  onToggle,
+  cardSev,
+  cardTitle,
+  cardDescription,
+  cardRemediation,
+  newTitle,
+}: {
+  item: Item;
+  open: boolean;
+  printing: boolean;
+  flash: boolean;
+  onToggle: (key: string) => void;
+  cardSev: Severity;
+  cardTitle: string;
+  cardDescription: string;
+  cardRemediation: string;
+  newTitle?: string;
+}) {
+  const { f, key, sup } = item;
+  const loc = location(f);
+  const panelId = `${key}-details`;
+  const ownDescription = describe(item);
+  const extraDescription = ownDescription && ownDescription !== cardDescription ? ownDescription : null;
+  const extraRemediation = f.remediation && f.remediation !== cardRemediation ? f.remediation : null;
+  const hasDetails = !!(f.snippet || extraDescription || extraRemediation || sup);
+  return (
+    <li id={key} className={`avoid-break scroll-mt-24 border-t border-line transition-colors duration-700 first:border-t-0 ${flash ? "bg-brand-soft/60" : ""}`}>
+      <button
+        type="button"
+        onClick={() => onToggle(key)}
+        aria-expanded={open}
+        aria-controls={panelId}
+        className={`flex w-full items-center gap-3 px-3.5 py-2.5 text-left transition-colors focus-visible:-outline-offset-2 ${
+          open ? "bg-surface-2/60" : "hover:bg-surface-2"
+        }`}
+      >
+        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+            <span className="min-w-0 break-all font-mono text-xs text-ink" title={loc ?? undefined}>
+              {loc ? shortPath(loc, 72) : "Not tied to a file"}
+            </span>
+            {f.severity !== cardSev && <SeverityChip severity={f.severity} />}
+            {item.isNew && <NewTag title={newTitle} />}
+            {sup && <SuppressedTag sup={sup} />}
+          </span>
+          {f.title !== cardTitle && <span className="break-words text-[13px] leading-5 text-muted">{f.title}</span>}
+        </span>
+        <ChevronDownIcon size={16} className={`shrink-0 text-subtle transition-transform print:hidden ${open ? "rotate-180" : ""}`} />
+      </button>
+      <div id={panelId} className={`${open ? "block" : "hidden print:block"} px-3.5 pb-3.5`}>
+        {(open || printing) && (
+          <div className="space-y-3 text-sm leading-6 text-ink-2">
+            {f.snippet && (
+              <pre
+                tabIndex={0}
+                aria-label={loc ? `Code at ${loc}` : "Code snippet"}
+                className="max-h-64 max-w-full overflow-auto rounded-lg border border-line bg-surface-2 px-4 py-3 font-mono text-xs leading-5 text-ink print:max-h-none print:whitespace-pre-wrap print:break-all"
+              >
+                <code>{f.snippet}</code>
+              </pre>
+            )}
+            {extraDescription && <p className="whitespace-pre-line break-words text-[13px] leading-5">{extraDescription}</p>}
+            {extraRemediation && (
+              <p className="whitespace-pre-line break-words text-[13px] leading-5">
+                <span className="font-semibold text-ink">Fix here: </span>
+                {extraRemediation}
+              </p>
+            )}
+            {sup && <SuppressionNote sup={sup} />}
+            {!hasDetails && <p className="text-[13px] leading-5 text-muted">No code excerpt for this place; the shared explanation and fix above apply.</p>}
+          </div>
+        )}
+      </div>
+    </li>
+  );
+});

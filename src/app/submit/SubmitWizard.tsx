@@ -17,10 +17,12 @@ import {
 } from "@/components/icons";
 import { AppIcon, GitBranchIcon, SkillIcon } from "@/components/icons-extra";
 import { StatusPill } from "@/components/StatusPill";
+import { nextVersion } from "@/lib/compare";
 import { DEMO_ANSWERS, DEMO_SKILL_ANSWERS } from "@/lib/demo-answers";
-import { formatBytes } from "@/lib/format";
+import { formatBytes, formatDate } from "@/lib/format";
 import { ALL_QUESTIONS, answerLabel, isSkill, isVisible, sectionsFor, validateAnswers, type Question, type Section } from "@/lib/questionnaire";
-import type { Answers } from "@/lib/types";
+import { DECISION_LABEL } from "@/lib/scoring";
+import type { Answers, Decision } from "@/lib/types";
 
 /* ------------------------------------------------------------------ constants */
 
@@ -339,6 +341,34 @@ function cloneAnswers(a: Answers): Answers {
   return out;
 }
 
+/* ------------------------------------------------------------------ new version of an earlier submission */
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+interface PreviousRef {
+  id: string;
+  name: string;
+  version: string | null;
+  submittedAt: string;
+  decision: Decision | null;
+  score: number | null;
+}
+
+/** Validates a previous-version reference from the API or a stored draft. */
+function parsePreviousRef(v: unknown): PreviousRef | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const r = v as Record<string, unknown>;
+  if (typeof r.id !== "string" || !UUID_RE.test(r.id) || typeof r.name !== "string" || typeof r.submittedAt !== "string") return null;
+  return {
+    id: r.id,
+    name: r.name.slice(0, 200),
+    version: typeof r.version === "string" && r.version ? r.version.slice(0, 50) : null,
+    submittedAt: r.submittedAt,
+    decision: r.decision === "approved" || r.decision === "conditional" || r.decision === "blocked" ? r.decision : null,
+    score: typeof r.score === "number" ? r.score : null,
+  };
+}
+
 /** The asset_type question without the "skill" option (skills have their own path). */
 function withoutSkillOption(q: Question): Question {
   return { ...q, options: q.options?.filter((o) => o.value !== "skill") };
@@ -397,6 +427,9 @@ export default function SubmitWizard() {
   const [nowTick, setNowTick] = useState(0);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [focusTarget, setFocusTarget] = useState<FocusTarget | null>(null);
+  /** Earlier submission this one is a new version of; the report then compares the two. */
+  const [previousOf, setPreviousOf] = useState<PreviousRef | null>(null);
+  const [previousError, setPreviousError] = useState<string | null>(null);
 
   const headingRef = useRef<HTMLHeadingElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -409,16 +442,32 @@ export default function SubmitWizard() {
     idempotencyKey.current = null;
   }, [answers]);
 
+  useEffect(() => {
+    idempotencyKey.current = null;
+  }, [previousOf]);
+
   /* draft persistence --------------------------------------------- */
   useEffect(() => {
+    let cancelled = false;
+    let draftPrevious: PreviousRef | null = null;
+    let draftHasAnswers = false;
     try {
       const raw = window.localStorage.getItem(DRAFT_KEY);
       if (raw) {
         const d: unknown = JSON.parse(raw);
         if (d && typeof d === "object") {
-          const draft = d as { answers?: unknown; step?: unknown; chosen?: unknown; source?: unknown; gitUrl?: unknown; gitRef?: unknown };
+          const draft = d as {
+            answers?: unknown;
+            step?: unknown;
+            chosen?: unknown;
+            source?: unknown;
+            gitUrl?: unknown;
+            gitRef?: unknown;
+            previous?: unknown;
+          };
           const restoredAnswers = sanitizeDraft(draft.answers);
           const any = Object.keys(restoredAnswers).length > 0;
+          draftHasAnswers = hasOwnAnswers(restoredAnswers);
           if (any) {
             setAnswers(restoredAnswers);
             setRestored(true);
@@ -429,22 +478,75 @@ export default function SubmitWizard() {
           if (draft.source === "file" || draft.source === "git") setSource(draft.source);
           if (typeof draft.gitUrl === "string") setGitUrl(draft.gitUrl.slice(0, 500));
           if (typeof draft.gitRef === "string") setGitRef(draft.gitRef.slice(0, 200));
+          draftPrevious = parsePreviousRef(draft.previous);
+          if (draftPrevious) setPreviousOf(draftPrevious);
         }
       }
     } catch {
       /* storage unavailable or corrupt draft: start empty */
     }
-    setHydrated(true);
+
+    // "Submit a new version" on a report links here with ?previous=<id>.
+    const wanted = new URLSearchParams(window.location.search).get("previous");
+    if (!wanted || !UUID_RE.test(wanted) || draftPrevious?.id === wanted) {
+      setHydrated(true);
+      return;
+    }
+    void (async () => {
+      try {
+        const res = await fetch(`/api/submissions/${encodeURIComponent(wanted)}`, { cache: "no-store" });
+        const d = await readBody(res);
+        if (cancelled) return;
+        if (!res.ok) throw new ApiError(errorMessage(d, res.status, "The previous version could not be loaded"), undefined, res.status);
+        const ref = parsePreviousRef({
+          id: d.id,
+          name: d.asset_name,
+          version: d.asset_version,
+          submittedAt: d.created_at,
+          decision: d.decision,
+          score: d.score,
+        });
+        if (!ref) throw new ApiError("The previous version could not be loaded.");
+        if (draftHasAnswers && !window.confirm(`Replace your unsent draft with the answers of “${ref.name}” to submit a new version of it?`)) return;
+        const next = sanitizeDraft(d.answers);
+        const bumped = nextVersion(ref.version);
+        if (bumped) next.asset_version = bumped;
+        else delete next.asset_version;
+        setAnswers(next);
+        setPreviousOf(ref);
+        setErrors({});
+        setAttempted({});
+        setChosen(true);
+        setRestored(false);
+        // The answers were complete last time, so go straight to the upload; the step bar still allows edits.
+        setStep(Object.keys(validateAnswers(next)).length === 0 ? sectionsFor(next).length : 0);
+        const src = d.source && typeof d.source === "object" ? (d.source as { type?: unknown; url?: unknown; ref?: unknown }) : null;
+        if (src && src.type === "git" && typeof src.url === "string") {
+          setSource("git");
+          setGitUrl(src.url.slice(0, 500));
+          setGitRef(typeof src.ref === "string" ? src.ref.slice(0, 200) : "");
+        } else {
+          setSource("file");
+        }
+      } catch (e) {
+        if (!cancelled) setPreviousError(e instanceof ApiError ? e.message : "The previous version could not be loaded.");
+      } finally {
+        if (!cancelled) setHydrated(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
     if (!hydrated) return;
     try {
-      window.localStorage.setItem(DRAFT_KEY, JSON.stringify({ answers, step, chosen, source, gitUrl, gitRef }));
+      window.localStorage.setItem(DRAFT_KEY, JSON.stringify({ answers, step, chosen, source, gitUrl, gitRef, previous: previousOf }));
     } catch {
       /* ignore quota / privacy mode */
     }
-  }, [answers, step, chosen, source, gitUrl, gitRef, hydrated]);
+  }, [answers, step, chosen, source, gitUrl, gitRef, previousOf, hydrated]);
 
   /* simulated scan progress ---------------------------------------- */
   useEffect(() => {
@@ -639,6 +741,8 @@ export default function SubmitWizard() {
     setChosen(false);
     setPick(null);
     setPickError(false);
+    setPreviousOf(null);
+    setPreviousError(null);
     try {
       window.localStorage.removeItem(DRAFT_KEY);
     } catch {
@@ -791,6 +895,7 @@ export default function SubmitWizard() {
     idempotencyKey.current = key;
     const jsonHeaders = { "content-type": "application/json", "idempotency-key": key };
     const clean = visibleAnswers(answers);
+    const link = previousOf ? { previousId: previousOf.id } : {};
     submittedName.current = String(clean.asset_name ?? "asset");
     setRun(
       target.mode === "file"
@@ -808,7 +913,7 @@ export default function SubmitWizard() {
         res = await fetch("/api/submissions", {
           method: "POST",
           headers: jsonHeaders,
-          body: JSON.stringify({ answers: clean, source: { type: "git", url: target.url, ...(target.ref ? { ref: target.ref } : {}) } }),
+          body: JSON.stringify({ answers: clean, ...link, source: { type: "git", url: target.url, ...(target.ref ? { ref: target.ref } : {}) } }),
         });
       } else {
         const f = target.file;
@@ -827,7 +932,7 @@ export default function SubmitWizard() {
           res = await fetch("/api/submissions", {
             method: "POST",
             headers: jsonHeaders,
-            body: JSON.stringify({ answers: clean, upload: { path: upload.path, fileName: f.name, size: f.size } }),
+            body: JSON.stringify({ answers: clean, ...link, upload: { path: upload.path, fileName: f.name, size: f.size } }),
           });
         } else {
           if (f.size > upload.maxBytes) {
@@ -835,6 +940,7 @@ export default function SubmitWizard() {
           }
           const form = new FormData();
           form.append("answers", JSON.stringify(clean));
+          if (previousOf) form.append("previousId", previousOf.id);
           form.append("file", f, f.name);
           setPhase("scanning");
           res = await fetch("/api/submissions", { method: "POST", headers: { "idempotency-key": key }, body: form });
@@ -929,7 +1035,7 @@ export default function SubmitWizard() {
         {/* Utility row */}
         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
           <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1">
-            <p className="text-sm font-semibold text-ink-2">New submission</p>
+            <p className="text-sm font-semibold text-ink-2">{previousOf ? "New version" : "New submission"}</p>
             <span className="inline-flex h-6 items-center gap-1.5 rounded-full bg-white px-2.5 text-xs font-medium text-ink-2 ring-1 ring-inset ring-line">
               {kind === "skill" ? <SkillIcon size={13} className="text-brand" /> : <AppIcon size={13} className="text-brand" />}
               {kind === "skill" ? "Agent skill" : "AI application or model"}
@@ -948,6 +1054,15 @@ export default function SubmitWizard() {
             </button>
           </div>
         </div>
+
+        {previousOf ? (
+          <PreviousVersionBanner previous={previousOf} newVersion={typeof answers.asset_version === "string" ? answers.asset_version : ""} onUnlink={() => setPreviousOf(null)} />
+        ) : previousError ? (
+          <p className="mt-4 flex items-start gap-2 rounded-xl border border-[#FEDF89] bg-warn-soft px-4 py-3 text-[13px] leading-5 text-ink-2" role="status">
+            <AlertIcon size={16} className="mt-0.5 shrink-0 text-warn" />
+            <span>{previousError} This submission will be scanned on its own, without a comparison.</span>
+          </p>
+        ) : null}
 
         <StepProgress step={currentStep} titles={stepTitles} short={stepShort} states={stepStates} onSelect={goTo} />
 
@@ -1102,6 +1217,37 @@ export default function SubmitWizard() {
       </div>
 
       {!section && <AfterSubmit kind={kind} />}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ new version banner */
+
+function PreviousVersionBanner({ previous, newVersion, onUnlink }: { previous: PreviousRef; newVersion: string; onUnlink: () => void }) {
+  const was = previous.version ? `v${previous.version.replace(/^v/i, "")}` : "the previous version";
+  const now = newVersion.trim() ? `v${newVersion.trim().replace(/^v/i, "")}` : null;
+  return (
+    <div className="mt-4 flex flex-col gap-3 rounded-xl border border-brand/25 bg-brand-soft px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+      <div className="min-w-0 text-[13px] leading-5 text-ink-2">
+        <p className="text-sm font-semibold text-ink">
+          New version of <span className="break-words">{previous.name}</span>
+          {now ? <span className="font-medium text-muted"> · {was} → {now}</span> : null}
+        </p>
+        <p className="mt-0.5">
+          Your answers from {was} (submitted {formatDate(previous.submittedAt)}
+          {previous.decision ? `, ${DECISION_LABEL[previous.decision]}` : ""}
+          {typeof previous.score === "number" ? `, score ${previous.score}` : ""}) are filled in. The report will show what you fixed, what is new and
+          what is still open.
+        </p>
+      </div>
+      <div className="flex shrink-0 items-center gap-1">
+        <a href={`/reports/${previous.id}`} target="_blank" rel="noopener noreferrer" className={btn.ghost}>
+          Previous report
+        </a>
+        <button type="button" onClick={onUnlink} className={btn.ghost} title="Scan this submission on its own, without comparing it">
+          Don&apos;t compare
+        </button>
+      </div>
     </div>
   );
 }

@@ -338,7 +338,7 @@ export default function FlowDiagram({ className = "" }: { className?: string }) 
               </Badge>
             }
             title="Fix and resubmit"
-            line="Follow the fixes in the report, then submit a new version."
+            line="Follow the fixes in the report, then submit a new version. Its report shows what you fixed."
             time="Back to step 1"
           />
         </li>
@@ -352,7 +352,12 @@ export default function FlowDiagram({ className = "" }: { className?: string }) 
         </li>
         <li className="relative" style={at("5 / 8", "7")}>
           <ArrowInFromTop gap={STEP_ROW} />
-          <Node badge={<Badge>5</Badge>} title="Published in the Azure AI catalogue" line="Listed with its report and SBOM attached." time="Same day" />
+          <Node
+            badge={<Badge>5</Badge>}
+            title="Uploaded to the Azure AI catalogue"
+            line="Only now is the asset written to the catalogue database, with its report and SBOM attached."
+            time="Same day"
+          />
         </li>
 
         {/* Key */}
@@ -410,7 +415,7 @@ export default function FlowDiagram({ className = "" }: { className?: string }) 
                 <NextSteps
                   items={[
                     { icon: <ReviewerIcon size={15} />, text: "4 · Reviewer sign-off", hint: "1–2 working days" },
-                    { icon: <CatalogueIcon size={15} />, text: "5 · Published in the Azure AI catalogue", hint: "same day" },
+                    { icon: <CatalogueIcon size={15} />, text: "5 · Uploaded to the Azure AI catalogue", hint: "same day" },
                   ]}
                 />
               </OutcomeNode>

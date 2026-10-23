@@ -1,5 +1,6 @@
 import "server-only";
 import { createHash } from "node:crypto";
+import { compareWithPrevious } from "../compare";
 import { consistencyFindings } from "../consistency";
 import { ALL_QUESTIONS, isVisible, questionnaireFindings, validateAnswers } from "../questionnaire";
 import { evaluate } from "../scoring";
@@ -49,6 +50,21 @@ export interface SubmitOptions {
   deadline?: number;
   /** Idempotency-Key van de client: een retry van hetzelfde verzoek levert de bestaande submission op. */
   idempotencyKey?: string;
+  /** Submission waarvan dit een nieuwe versie is: het rapport toont dan wat er is opgelost, nieuw en nog open. */
+  previousId?: string;
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Leest de vorige versie in. Een onbekende of ongeldige verwijzing blokkeert de indiening niet: die wordt dan genegeerd. */
+async function loadPrevious(previousId: string | undefined): Promise<Submission | null> {
+  if (!previousId || !UUID.test(previousId)) return null;
+  try {
+    return await getStore().get(previousId);
+  } catch (e) {
+    console.warn("previous version could not be loaded", previousId, e);
+    return null;
+  }
 }
 
 /** Alleen paden die /api/uploads zelf uitgeeft (zie uploadPath): geen traversal, geen andere prefixen. */
@@ -123,6 +139,7 @@ export async function submitAsset(rawAnswers: unknown, file: IncomingFile, opts:
 
   const sha256 = createHash("sha256").update(data).digest("hex");
   const owner = String(answers.owner_name);
+  const previous = await loadPrevious(opts.previousId);
 
   let sub: Submission;
   try {
@@ -138,6 +155,7 @@ export async function submitAsset(rawAnswers: unknown, file: IncomingFile, opts:
       file_size: data.byteLength,
       file_path: path,
       file_sha256: sha256,
+      previous_id: previous?.id ?? null,
     }, { idempotencyKey: opts.idempotencyKey });
   } catch (e) {
     // unieke index op idempotency_key of file_path (migratie 0002): gelijktijdige retry van hetzelfde verzoek
@@ -157,6 +175,7 @@ export async function submitAsset(rawAnswers: unknown, file: IncomingFile, opts:
       size: data.byteLength,
       sha256,
       ...(file.origin ? { repository: file.origin.url, ref: file.origin.ref ?? "default branch" } : {}),
+      ...(previous ? { previousId: previous.id, ...(previous.asset_version ? { previousVersion: previous.asset_version } : {}) } : {}),
     });
     const budget = Math.max(MIN_SCAN_MS, (opts.deadline ?? Date.now() + DEFAULT_SCAN_MS) - Date.now());
     // De scanner stopt trage netwerkcontroles iets vóór de harde time-out en levert dan een gedeeltelijk resultaat
@@ -164,6 +183,7 @@ export async function submitAsset(rawAnswers: unknown, file: IncomingFile, opts:
     const scan: ScanOutput = await withTimeout(scanArchive(fileName, data, { deadline: Date.now() + budget - 2_000 }), budget);
     const findings = [...scan.findings, ...questionnaireFindings(answers), ...consistencyFindings(answers, scan.findings)];
     const ev = evaluate(findings, answers);
+    const comparison = previous ? compareWithPrevious(previous, findings) : undefined;
     const report: Report = {
       findings,
       scanners: scan.scanners,
@@ -173,6 +193,7 @@ export async function submitAsset(rawAnswers: unknown, file: IncomingFile, opts:
       generatedAt: new Date().toISOString(),
       engineVersion: ENGINE_VERSION,
       skills: scan.skills,
+      ...(comparison ? { comparison } : {}),
     };
     const done = await store.update(sub.id, {
       status: "completed",
@@ -189,6 +210,7 @@ export async function submitAsset(rawAnswers: unknown, file: IncomingFile, opts:
       findings: findings.length,
       failedGates: ev.gates.filter((g) => !g.passed).map((g) => g.id),
       engineVersion: ENGINE_VERSION,
+      ...(comparison ? { fixedSincePrevious: comparison.fixedTotal, newSincePrevious: comparison.added.length, stillOpen: comparison.open.length } : {}),
     });
     return done;
   } catch (e) {

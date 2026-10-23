@@ -56,9 +56,15 @@ export async function POST(req: Request) {
       } catch {
         throw new HttpError(400, "Invalid answers.");
       }
-      sub = await submitAsset(answers, { fileName: file.name, size: file.size, data: new Uint8Array(await file.arrayBuffer()) }, { deadline, idempotencyKey });
+      const previousId = str(form.get("previousId"), 64) || undefined;
+      sub = await submitAsset(
+        answers,
+        { fileName: file.name, size: file.size, data: new Uint8Array(await file.arrayBuffer()) },
+        { deadline, idempotencyKey, previousId },
+      );
     } else {
       const body = await readJson(req);
+      const previousId = str(body.previousId, 64) || undefined;
       const source = body.source && typeof body.source === "object" && !Array.isArray(body.source) ? (body.source as Record<string, unknown>) : null;
       if (source && source.type === "git") {
         // eerst de intake controleren, dan pas downloaden
@@ -69,11 +75,11 @@ export async function POST(req: Request) {
         sub = await submitAsset(
           body.answers,
           { fileName, size: data.byteLength, data, origin: { type: "git", url: git.url, ref } },
-          { deadline, idempotencyKey },
+          { deadline, idempotencyKey, previousId },
         );
       } else {
         const upload = body.upload && typeof body.upload === "object" && !Array.isArray(body.upload) ? (body.upload as Record<string, unknown>) : {};
-        sub = await submitAsset(body.answers, { fileName: str(upload.fileName), size: Number(upload.size) || 0, path: str(upload.path, 300) }, { deadline, idempotencyKey });
+        sub = await submitAsset(body.answers, { fileName: str(upload.fileName), size: Number(upload.size) || 0, path: str(upload.path, 300) }, { deadline, idempotencyKey, previousId });
       }
     }
     return json(summary(sub), 201);

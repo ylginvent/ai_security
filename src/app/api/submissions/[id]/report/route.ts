@@ -15,6 +15,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
         asset: { name: s.asset_name, version: s.asset_version, type: s.asset_type, businessUnit: s.business_unit },
         owner: { name: s.owner_name, email: s.owner_email },
         file: { name: s.file_name, size: s.file_size, sha256: s.file_sha256 },
+        previousSubmissionId: s.previous_id ?? s.report?.comparison?.previousId ?? null,
       },
       result: {
         status: s.status,

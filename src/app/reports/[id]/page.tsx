@@ -7,6 +7,7 @@ import {
   AlertIcon,
   ArrowRightIcon,
   CheckCircleIcon,
+  CheckIcon,
   ChevronRightIcon,
   DownloadIcon,
   FileIcon,
@@ -33,6 +34,7 @@ import {
   shortPath,
   suppressionInfo,
 } from "@/lib/format";
+import { ruleKey } from "@/lib/compare";
 import { AI_ACT_LABEL, ALL_QUESTIONS, SECTIONS, answerLabel, isSkill, isVisible } from "@/lib/questionnaire";
 import { DECISION_LABEL, PASS_SCORE, suppressionOf, trustScore } from "@/lib/scoring";
 import { getStore } from "@/lib/store";
@@ -41,6 +43,8 @@ import {
   SCAN_INCOMPLETE_RULE,
   SEVERITIES,
   type AuditEvent,
+  type Comparison,
+  type ComparedFinding,
   type Decision,
   type Finding,
   type GateResult,
@@ -50,6 +54,7 @@ import {
   type ScannerRun,
   type Severity,
   type Submission,
+  type VersionRef,
 } from "@/lib/types";
 import { findingAnchor } from "./anchors";
 import AutoRefresh from "./AutoRefresh";
@@ -246,6 +251,30 @@ function fixFirst(findings: Finding[]): { f: Finding; index: number; blocking: b
     .map(({ f, index, blocking }) => ({ f, index, blocking }));
 }
 
+/** Number of findings per rule (scanner:ruleId). */
+function ruleCounts(findings: Finding[]): Map<string, number> {
+  const m = new Map<string, number>();
+  for (const f of findings) m.set(ruleKey(f), (m.get(ruleKey(f)) ?? 0) + 1);
+  return m;
+}
+
+/** Repeats of one rule as one line: the worst (then first) finding of each rule plus how often the rule fired. Worst rules first. */
+function groupByRule<T extends { f: { scanner: string; ruleId: string; severity: Severity }; index: number }>(list: T[]): (T & { count: number })[] {
+  const sorted = [...list].sort((a, b) => SEV_RANK[a.f.severity] - SEV_RANK[b.f.severity] || a.index - b.index);
+  const out = new Map<string, T & { count: number }>();
+  for (const x of sorted) {
+    const k = ruleKey(x.f);
+    const hit = out.get(k);
+    if (hit) hit.count++;
+    else out.set(k, { ...x, count: 1 });
+  }
+  return [...out.values()];
+}
+
+function versionLabel(v: string | null | undefined): string {
+  return v ? `v${v.replace(/^v/i, "")}` : "the previous version";
+}
+
 /** First sentence of a text, for compact previews. */
 function firstSentence(text: string, max = 160): string {
   const t = text.trim();
@@ -285,6 +314,11 @@ function eventSummary(detail: Record<string, unknown>, gateLabels: Map<string, s
     else if (k === "failedGates" && Array.isArray(v))
       text = v.length ? `Failed: ${v.map((g) => gateLabels.get(String(g)) ?? String(g)).join(", ")}` : "All gates passed";
     else if (k === "catalogueId") text = `Entry ${String(v)}`;
+    else if (k === "previousId" && typeof v === "string") text = `New version of submission ${v.slice(0, 8)}`;
+    else if (k === "previousVersion" && typeof v === "string") text = `Previous ${versionLabel(v)}`;
+    else if (k === "fixedSincePrevious" && typeof v === "number") text = `${v} fixed`;
+    else if (k === "newSincePrevious" && typeof v === "number") text = `${v} new`;
+    else if (k === "stillOpen" && typeof v === "number") text = `${v} still open`;
     else if (k === "file" && typeof v === "string") text = v;
     else if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") text = `${humanize(k)}: ${String(v)}`;
     else if (Array.isArray(v)) text = `${humanize(k)}: ${v.map((x) => String(x)).join(", ")}`;
@@ -306,15 +340,24 @@ export default async function ReportPage({ params }: Props) {
   const s = await getSubmission(id);
   if (!s) notFound();
 
-  let events: AuditEvent[] = [];
-  try {
-    events = await getStore().events(s.id);
-  } catch (e) {
-    console.error("audit events", e);
-  }
+  const [events, newer] = await Promise.all([
+    getStore()
+      .events(s.id)
+      .catch((e): AuditEvent[] => {
+        console.error("audit events", e);
+        return [];
+      }),
+    getStore()
+      .findNewerVersion(s.id)
+      .catch((e): VersionRef | null => {
+        console.error("newer version", e);
+        return null;
+      }),
+  ]);
 
   const report = s.status === "completed" ? s.report : null;
   const gateLabels = new Map((report?.gates ?? []).map((g) => [g.id, g.label] as const));
+  const comparison = report?.comparison ?? null;
 
   return (
     <div className="space-y-8">
@@ -353,7 +396,11 @@ export default async function ReportPage({ params }: Props) {
         </div>
       </div>
 
-      <Hero s={s} report={report} />
+      {newer && <NewerVersionNotice newer={newer} />}
+
+      <Hero s={s} report={report} hasNewer={!!newer} />
+
+      {report && comparison && <ComparisonCard s={s} report={report} c={comparison} />}
 
       {report && <ScanNotice report={report} />}
 
@@ -375,6 +422,8 @@ export default async function ReportPage({ params }: Props) {
                   findings={report.findings}
                   scanners={scannerOptions(report)}
                   incomplete={report.scanners.some((sc) => sc.status === "error")}
+                  added={comparison?.added}
+                  previousLabel={comparison ? versionLabel(comparison.previousVersion) : undefined}
                 />
               </Card>
               <CoverageCard report={report} />
@@ -491,7 +540,7 @@ function heroMessage(s: Submission, report: Report, decision: Decision): string 
   return `All ${report.gates.length} checks passed. A security reviewer signs off next, then the asset can be published to the catalogue.`;
 }
 
-function Hero({ s, report }: { s: Submission; report: Report | null }) {
+function Hero({ s, report, hasNewer }: { s: Submission; report: Report | null; hasNewer: boolean }) {
   const decision: Decision | null = report ? (s.decision ?? "conditional") : null;
   const tone: HeroTone = decision ?? (s.status === "failed" ? "blocked" : "neutral");
   const t = HERO[tone];
@@ -506,6 +555,19 @@ function Hero({ s, report }: { s: Submission; report: Report | null }) {
     const text = heroMessage(s, report, decision);
     const partial = report.scanners.some((sc) => sc.status === "error") && s.catalog_status !== "published";
     message = partial ? `${text} Part of the scan did not finish, so the result may change when you submit again.` : text;
+    if (!hasNewer) {
+      // Fixing is the expected next step unless the asset is approved or published; then a new version is optional.
+      const needsWork = s.review_status !== "approved" && s.catalog_status !== "published" && (decision !== "approved" || s.review_status === "rejected");
+      cta = (
+        <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 print:hidden">
+          <Link href={`/submit?previous=${s.id}`} className={needsWork ? btn.primary : btn.secondary}>
+            Submit a new version
+            <ArrowRightIcon size={16} />
+          </Link>
+          <span className="text-[13px] text-muted">Your answers are filled in, and the new report shows what you fixed.</span>
+        </div>
+      );
+    }
   } else if (s.status === "failed") {
     pill = "Scan failed";
     message = (
@@ -516,7 +578,7 @@ function Hero({ s, report }: { s: Submission; report: Report | null }) {
     );
     cta = (
       <div className="mt-4 flex flex-wrap gap-2 print:hidden">
-        <Link href="/submit" className={btn.primary}>
+        <Link href={s.previous_id ? `/submit?previous=${s.previous_id}` : "/submit"} className={btn.primary}>
           Submit again
           <ArrowRightIcon size={16} />
         </Link>
@@ -631,6 +693,8 @@ function Hero({ s, report }: { s: Submission; report: Report | null }) {
             total={report.findings.length}
             rowCls={t.row}
             incomplete={report.scanners.some((sc) => sc.status === "error")}
+            ruleCounts={ruleCounts(report.findings)}
+            added={new Set(report.comparison?.added ?? [])}
           />
         )}
       </div>
@@ -652,11 +716,15 @@ function FixFirst({
   total,
   rowCls,
   incomplete,
+  ruleCounts,
+  added,
 }: {
   picks: { f: Finding; index: number; blocking: boolean }[];
   total: number;
   rowCls: string;
   incomplete: boolean;
+  ruleCounts: Map<string, number>;
+  added: Set<number>;
 }) {
   return (
     <div className="min-w-0 print:mt-6">
@@ -681,6 +749,7 @@ function FixFirst({
           <ol className="mt-3 space-y-2.5">
             {picks.map(({ f, index, blocking }) => {
               const loc = findingLocation(f);
+              const repeats = (ruleCounts.get(ruleKey(f)) ?? 1) - 1;
               return (
                 <li key={findingAnchor(index)}>
                   <FixFirstLink
@@ -703,6 +772,18 @@ function FixFirst({
                         ) : (
                           <span>{SCANNER_LABEL[f.scanner] ?? f.scanner}</span>
                         )}
+                        {repeats > 0 && (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            <span className="font-medium text-ink-2">+{repeats} more like this</span>
+                          </>
+                        )}
+                        {added.has(index) && (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            <span className="font-semibold text-sev-high-ink">New</span>
+                          </>
+                        )}
                       </span>
                       {f.remediation && (
                         <span className="text-[13px] leading-5 text-ink-2">
@@ -724,6 +805,296 @@ function FixFirst({
             </a>
           )}
         </>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ versions */
+
+function NewerVersionNotice({ newer }: { newer: VersionRef }) {
+  const result =
+    newer.status === "completed" && newer.decision
+      ? `${DECISION_LABEL[newer.decision]}${typeof newer.score === "number" ? `, score ${newer.score}` : ""}`
+      : newer.status === "scanning"
+        ? "scan in progress"
+        : "scan failed";
+  return (
+    <div className="flex flex-col gap-3 rounded-xl border border-brand/25 bg-brand-soft px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6 print:hidden" role="note">
+      <p className="flex items-start gap-2 text-sm leading-5 text-ink-2">
+        <InfoIcon size={18} className="mt-px shrink-0 text-brand" />
+        <span>
+          <span className="font-semibold text-ink">A newer version was submitted</span>
+          {newer.asset_version ? ` (${versionLabel(newer.asset_version)})` : ""} on {formatDate(newer.created_at)}: {result}. This report is kept for the
+          record.
+        </span>
+      </p>
+      <Link href={`/reports/${newer.id}`} className={`${btn.primary} shrink-0`}>
+        Open the latest report
+        <ArrowRightIcon size={16} />
+      </Link>
+    </div>
+  );
+}
+
+const MAX_CHANGE_ROWS = 6;
+
+interface ChangeRow {
+  key: string;
+  title: string;
+  severity: Severity;
+  count: number;
+  /** Location when the rule fired once. */
+  loc: string | null;
+  /** Finding index in this report (new and still-open rows link to it). */
+  index?: number;
+  note?: string;
+}
+
+function fixedRows(fixed: ComparedFinding[]): ChangeRow[] {
+  const map = new Map<string, ChangeRow & { waived: number }>();
+  for (const f of fixed) {
+    const k = ruleKey(f);
+    const loc = f.file ? (f.line ? `${f.file}:${f.line}` : f.file) : null;
+    const hit = map.get(k);
+    if (!hit) {
+      map.set(k, { key: k, title: f.title, severity: f.severity, count: 1, loc, waived: f.waived ? 1 : 0 });
+      continue;
+    }
+    hit.count++;
+    hit.loc = null;
+    if (f.waived) hit.waived++;
+    if (SEV_RANK[f.severity] < SEV_RANK[hit.severity]) hit.severity = f.severity;
+  }
+  return [...map.values()]
+    .map(({ waived, ...r }) => ({
+      ...r,
+      note: waived === 0 ? undefined : waived === r.count ? "now an exception or test code" : `${waived} now an exception or test code`,
+    }))
+    .sort((a, b) => SEV_RANK[a.severity] - SEV_RANK[b.severity] || b.count - a.count);
+}
+
+function currentRows(report: Report, list: { index: number; was?: Severity }[]): ChangeRow[] {
+  const indexed = list.filter((x) => report.findings[x.index]).map((x) => ({ f: report.findings[x.index], index: x.index, was: x.was }));
+  return groupByRule(indexed).map(({ f, index, count, was }) => ({
+    key: ruleKey(f),
+    title: f.title,
+    severity: f.severity,
+    count,
+    loc: count === 1 ? findingLocation(f) : null,
+    index,
+    note: was && count === 1 ? `was ${SEVERITY_LABEL[was]}` : undefined,
+  }));
+}
+
+function ComparisonCard({ s, report, c }: { s: Submission; report: Report; c: Comparison }) {
+  const prev = versionLabel(c.previousVersion);
+  const fixed = c.fixedTotal;
+  const added = c.added.length;
+  const open = c.open.length;
+  const before = fixed + open;
+  const pct = before > 0 ? Math.round((fixed / before) * 100) : 0;
+  const delta = typeof s.score === "number" && typeof c.previousScore === "number" ? s.score - c.previousScore : null;
+  const newIssues = added > 0 ? ` ${plural(added, "new issue")} appeared.` : " No new issues.";
+
+  let headline: string;
+  if (before === 0) headline = added === 0 ? `Nothing to fix in ${prev}, and still nothing to fix.` : `${prev} had nothing to fix.${newIssues}`;
+  else if (fixed === before) headline = `All ${plural(before, "issue")} from ${prev} ${before === 1 ? "is" : "are"} fixed.${newIssues}`;
+  else if (fixed > 0) headline = `You fixed ${fixed} of the ${plural(before, "issue")} from ${prev}.${newIssues}`;
+  else headline = `None of the ${plural(before, "issue")} from ${prev} ${before === 1 ? "is" : "are"} fixed yet.${newIssues}`;
+
+  const fixedList = fixedRows(c.fixed);
+  const newList = currentRows(report, c.added.map((index) => ({ index })));
+  const openList = currentRows(report, c.open);
+  const engineChanged = !!c.previousEngineVersion && c.previousEngineVersion !== report.engineVersion;
+
+  const tiles: { label: string; value: ReactNode; sub: string; cls: string }[] = [
+    {
+      label: "Fixed",
+      value: fixed,
+      sub: before > 0 ? `${pct}% of ${prev}'s issues` : "No earlier issues",
+      cls: fixed > 0 ? "border-[#ABEFC6] bg-[#F6FEF9] text-ok" : "border-line text-ink",
+    },
+    { label: "New", value: added, sub: added > 0 ? "Not in the previous version" : "Nothing new", cls: added > 0 ? "border-[#F9D3CF] bg-[#FFFBFA] text-sev-critical" : "border-line text-ink" },
+    { label: "Still open", value: open, sub: open > 0 ? "Carried over" : "Nothing carried over", cls: "border-line text-ink" },
+    {
+      label: "Trust score",
+      value: (
+        <>
+          {c.previousScore ?? "—"} <span className="text-subtle">→</span> {s.score ?? "—"}
+        </>
+      ),
+      sub: delta === null ? "" : delta === 0 ? "Unchanged" : `${delta > 0 ? "+" : ""}${delta} points`,
+      cls: delta !== null && delta > 0 ? "border-line text-ok" : delta !== null && delta < 0 ? "border-line text-sev-critical" : "border-line text-ink",
+    },
+  ];
+
+  return (
+    <Card id="changes" labelledBy="changes-title" className="avoid-break scroll-mt-24">
+      <CardHeader
+        id="changes-title"
+        title={`Since ${prev}`}
+        description={
+          <>
+            {headline} Compared with {prev}, submitted {formatDate(c.previousSubmittedAt)}
+            {c.previousDecision ? ` (${DECISION_LABEL[c.previousDecision]})` : ""}.
+          </>
+        }
+        actions={
+          <Link href={`/reports/${c.previousId}`} className={`${btn.secondary} print:hidden`}>
+            Previous report
+          </Link>
+        }
+      />
+      <div className="space-y-5 px-5 py-5 sm:px-6">
+        {before > 0 && (
+          <div>
+            <div className="flex items-center justify-between text-[13px] text-muted">
+              <span>Progress on the issues from {prev}</span>
+              <span className="tabular font-semibold text-ink-2">
+                {fixed}/{before}
+              </span>
+            </div>
+            <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-line" role="img" aria-label={`${pct}% of the issues from ${prev} fixed`}>
+              <span className="block h-full rounded-full bg-ok" style={{ width: `${pct}%` }} />
+            </div>
+          </div>
+        )}
+
+        <dl className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          {tiles.map((t) => (
+            <div key={t.label} className={`min-w-0 rounded-lg border px-3.5 py-3 ${t.cls}`}>
+              <dt className="truncate text-[13px] text-subtle">{t.label}</dt>
+              <dd className="tabular mt-1 font-display text-xl font-semibold">{t.value}</dd>
+              {t.sub && <dd className="mt-0.5 truncate text-xs text-muted">{t.sub}</dd>}
+            </div>
+          ))}
+        </dl>
+
+        {c.previousDecision && s.decision && c.previousDecision !== s.decision && (
+          <p className="text-[13px] text-ink-2">
+            Decision changed from <span className="font-semibold">{DECISION_LABEL[c.previousDecision]}</span> to{" "}
+            <span className="font-semibold">{DECISION_LABEL[s.decision]}</span>.
+          </p>
+        )}
+
+        <div className="grid gap-5 md:grid-cols-2">
+          <ChangeList
+            title="Fixed"
+            icon={<CheckCircleIcon size={16} className="text-ok" />}
+            rows={fixedList}
+            empty="Nothing from the previous version was fixed yet."
+            more={fixed - c.fixed.length}
+            struck
+          />
+          <ChangeList title="New" icon={<AlertIcon size={16} className="text-sev-critical" />} rows={newList} empty="No new issues. Nice work." />
+        </div>
+
+        {openList.length > 0 && (
+          <details className="group rounded-lg border border-line">
+            <summary className="flex items-center justify-between gap-2 px-4 py-3 text-sm font-semibold text-ink">
+              <span>
+                Still open: {plural(open, "finding")} in {plural(openList.length, "issue")}
+              </span>
+              <ChevronRightIcon size={16} className="text-subtle transition-transform group-open:rotate-90" />
+            </summary>
+            <div className="border-t border-line px-4 py-3">
+              <ChangeList rows={openList} empty="" bare />
+            </div>
+          </details>
+        )}
+
+        {engineChanged && (
+          <p className="flex gap-2 text-[13px] leading-5 text-muted">
+            <InfoIcon size={16} className="mt-0.5 shrink-0 text-brand" />
+            <span>
+              The scanner was updated between the two versions (engine {c.previousEngineVersion} → {report.engineVersion}). Some new findings may come from
+              new checks rather than from changes to your code.
+            </span>
+          </p>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+function ChangeList({
+  title,
+  icon,
+  rows,
+  empty,
+  more = 0,
+  struck = false,
+  bare = false,
+}: {
+  title?: string;
+  icon?: ReactNode;
+  rows: ChangeRow[];
+  empty: string;
+  more?: number;
+  struck?: boolean;
+  bare?: boolean;
+}) {
+  const shown = bare ? rows : rows.slice(0, MAX_CHANGE_ROWS);
+  const hidden = rows.length - shown.length;
+  return (
+    <div className="min-w-0">
+      {title && (
+        <h3 className="flex items-center gap-1.5 text-[13px] font-semibold text-ink">
+          {icon}
+          {title}
+        </h3>
+      )}
+      {rows.length === 0 ? (
+        <p className={`${title ? "mt-1.5" : ""} text-[13px] text-muted`}>{empty}</p>
+      ) : (
+        <ul className={`${title ? "mt-1.5" : ""} space-y-1.5`}>
+          {shown.map((r) => {
+            const body = (
+              <span className="flex min-w-0 flex-col">
+                <span className={`break-words text-[13px] font-medium leading-5 ${struck ? "text-muted line-through decoration-faint" : "text-ink group-hover:underline"}`}>
+                  {r.title}
+                </span>
+                <span className="flex flex-wrap items-center gap-x-1.5 text-xs text-subtle">
+                  <span className={`inline-flex items-center gap-1 font-semibold ${SEV_TEXT[r.severity]}`}>
+                    <span className={`size-1.5 rounded-full ${SEV_BG[r.severity]}`} aria-hidden="true" />
+                    {SEVERITY_LABEL[r.severity]}
+                  </span>
+                  {r.count > 1 ? (
+                    <span>· {r.count} places</span>
+                  ) : r.loc ? (
+                    <span className="min-w-0 break-all font-mono" title={r.loc}>
+                      · {shortPath(r.loc, 44)}
+                    </span>
+                  ) : null}
+                  {r.note && <span>· {r.note}</span>}
+                </span>
+              </span>
+            );
+            return (
+              <li key={r.key} className="min-w-0">
+                {r.index !== undefined ? (
+                  <FixFirstLink index={r.index} className="group flex min-w-0 items-start gap-1.5">
+                    <ArrowRightIcon size={13} className="mt-1 shrink-0 text-brand print:hidden" />
+                    {body}
+                  </FixFirstLink>
+                ) : (
+                  <div className="flex min-w-0 items-start gap-1.5">
+                    <CheckIcon size={13} className="mt-1 shrink-0 text-ok" />
+                    {body}
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {(hidden > 0 || more > 0) && (
+        <p className="mt-1.5 text-xs text-muted">
+          and {hidden > 0 ? plural(hidden, "more issue") : ""}
+          {hidden > 0 && more > 0 ? ", plus " : ""}
+          {more > 0 ? `${more} more not listed` : ""}
+        </p>
       )}
     </div>
   );
@@ -755,7 +1126,7 @@ function GatesCard({ report }: { report: Report }) {
       <ul className="divide-y divide-line">
         {gates.map(({ g }) => {
           const match = GATE_FINDINGS[g.id];
-          const causes = !g.passed && match ? indexed.filter((x) => match(x.f)).sort((a, b) => SEV_RANK[a.f.severity] - SEV_RANK[b.f.severity] || a.index - b.index) : [];
+          const causes = !g.passed && match ? groupByRule(indexed.filter((x) => match(x.f))) : [];
           const action = g.passed ? null : gateAction(g, report);
           const status = g.passed ? "Passed" : g.blocking ? "Blocks publication" : "Needs reviewer sign-off";
           return (
@@ -790,7 +1161,7 @@ function GatesCard({ report }: { report: Report }) {
                   <div className="mt-2.5">
                     <p className="text-xs font-medium text-subtle">Caused by</p>
                     <ul className="mt-1 space-y-1">
-                      {causes.slice(0, MAX_GATE_LINKS).map(({ f, index }) => {
+                      {causes.slice(0, MAX_GATE_LINKS).map(({ f, index, count }) => {
                         const loc = findingLocation(f);
                         return (
                           <li key={index} className="min-w-0 text-[13px] leading-5">
@@ -798,10 +1169,14 @@ function GatesCard({ report }: { report: Report }) {
                               <ArrowRightIcon size={13} className="shrink-0 translate-y-0.5 print:hidden" />
                               <span className="min-w-0 break-words">
                                 <span className="font-medium group-hover:underline">{f.title}</span>
-                                {loc && (
-                                  <span className="ml-1.5 break-all font-mono text-xs text-muted" title={loc}>
-                                    {shortPath(loc, 48)}
-                                  </span>
+                                {count > 1 ? (
+                                  <span className="ml-1.5 text-xs font-medium text-muted">{count} places</span>
+                                ) : (
+                                  loc && (
+                                    <span className="ml-1.5 break-all font-mono text-xs text-muted" title={loc}>
+                                      {shortPath(loc, 48)}
+                                    </span>
+                                  )
                                 )}
                               </span>
                             </FixFirstLink>
@@ -811,7 +1186,7 @@ function GatesCard({ report }: { report: Report }) {
                     </ul>
                     {causes.length > MAX_GATE_LINKS && (
                       <a href="#findings" className="mt-1 inline-block text-[13px] font-semibold text-brand hover:text-brand-strong print:hidden">
-                        and {causes.length - MAX_GATE_LINKS} more in the findings list
+                        and {plural(causes.length - MAX_GATE_LINKS, "more issue")} in the findings list
                       </a>
                     )}
                   </div>
