@@ -59,6 +59,9 @@ export default function ReviewPanel(p: ReviewPanelProps) {
     const errs: { reviewer?: string; comment?: string } = {};
     if (!reviewer) errs.reviewer = "Enter your name to sign the review.";
     if (action === "reject" && !comment.trim()) errs.comment = "Explain why the submission is rejected.";
+    // Manual review means accepting residual risk: the gate policy asks for a documented risk acceptance.
+    if (action === "approve" && p.decision === "conditional" && !comment.trim())
+      errs.comment = "Document why the remaining risk is acceptable before approving.";
     setFieldErrors(errs);
     if (errs.reviewer || errs.comment) return;
 
@@ -110,6 +113,13 @@ export default function ReviewPanel(p: ReviewPanelProps) {
           Review &amp; publication
         </h2>
         <p className="mt-1 text-sm text-muted">A security reviewer signs off before the asset is listed.</p>
+        {completed && !published && (
+          <p className="mt-2 text-[13px] leading-5 text-subtle">
+            {isBlocked
+              ? "Submitted this asset? You don't need to do anything here. Fix the blocking issues and submit a new version."
+              : "Submitted this asset? You don't need to do anything here. A reviewer will pick it up; fixing open findings first speeds this up."}
+          </p>
+        )}
       </div>
 
       {/* Current state */}
@@ -189,7 +199,7 @@ export default function ReviewPanel(p: ReviewPanelProps) {
                 <label htmlFor="review-comment" className="text-sm font-medium text-ink-2">
                   Comment
                 </label>
-                <span className="text-xs text-subtle">Required to reject</span>
+                <span className="text-xs text-subtle">{p.decision === "conditional" ? "Required to approve or reject" : "Required to reject"}</span>
               </div>
               <textarea
                 id="review-comment"

@@ -27,7 +27,12 @@ type View = "all" | "review" | "blocked" | "approved" | "published";
 
 const VIEWS: { id: View; label: string; match: (s: Submission) => boolean }[] = [
   { id: "all", label: "All", match: () => true },
-  { id: "review", label: "Needs review", match: (s) => s.status === "completed" && s.decision === "conditional" && s.catalog_status !== "published" },
+  // Only items a reviewer still has to act on: once approved or rejected they leave this view.
+  {
+    id: "review",
+    label: "Needs review",
+    match: (s) => s.status === "completed" && s.decision === "conditional" && s.review_status === "pending" && s.catalog_status !== "published",
+  },
   { id: "blocked", label: "Blocked", match: (s) => s.status === "completed" && s.decision === "blocked" },
   { id: "approved", label: "Approved", match: (s) => s.status === "completed" && s.decision === "approved" && s.catalog_status !== "published" },
   { id: "published", label: "Published", match: (s) => s.catalog_status === "published" },
@@ -50,7 +55,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: Pro
   let subs: Submission[] = [];
   let loadError: string | null = null;
   try {
-    subs = await getStore().list(200);
+    subs = await getStore().list(200, { summary: true });
   } catch (e) {
     console.error(e);
     loadError = "Submissions could not be loaded. Check the storage configuration and try again.";

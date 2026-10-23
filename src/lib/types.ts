@@ -4,6 +4,24 @@ export const SEVERITIES: Severity[] = ["critical", "high", "medium", "low", "inf
 
 export type ScannerId = "secrets" | "dependencies" | "sast" | "ai" | "model" | "config" | "skill" | "questionnaire" | "consistency";
 
+/**
+ * ruleId van bevindingen die melden dat (een deel van) de scan niet is uitgevoerd: een scanner faalde of liep
+ * vast, de upload bevatte niets scanbaars of overschreed de limieten. Zulke bevindingen houden "Approved" tegen.
+ */
+export const SCAN_INCOMPLETE_RULE = "scan-incomplete";
+
+/** ruleId als er in de upload helemaal niets scanbaars zat: dat blokkeert (er valt niets te beoordelen). */
+export const SCAN_EMPTY_RULE = "scan-empty";
+
+/** Waarom een bevinding is afgewaardeerd naar "info". */
+export type SuppressionSource = "ignore-file" | "inline" | "test-code";
+
+export interface Suppression {
+  by: SuppressionSource;
+  originalSeverity: Severity;
+  reason?: string;
+}
+
 export interface Finding {
   id: string;
   scanner: ScannerId;
@@ -17,6 +35,8 @@ export interface Finding {
   file?: string;
   line?: number;
   snippet?: string;
+  /** Gezet als de bevinding is afgewaardeerd (.aigateignore, inline-uitzondering of test-/democode). */
+  suppressed?: Suppression;
 }
 
 export type Decision = "approved" | "conditional" | "blocked";

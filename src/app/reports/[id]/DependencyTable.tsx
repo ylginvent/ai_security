@@ -2,15 +2,25 @@
 
 import { useState } from "react";
 import { thead } from "@/components/Card";
-import { CheckIcon, ChevronDownIcon } from "@/components/icons";
+import { AlertIcon, ArrowRightIcon, CheckIcon, ChevronDownIcon } from "@/components/icons";
 import { SeverityChip } from "@/components/SeverityChip";
 import type { PackageRef, Severity } from "@/lib/types";
+import FixFirstLink from "./FixFirstLink";
 
 export interface DependencyRow {
   pkg: PackageRef;
-  /** Highest severity and number of dependency findings that mention this package, or null. */
-  vuln: { severity: Severity; count: number } | null;
+  /**
+   * Highest severity and number of vulnerability findings for this package, or null.
+   * `index` is the position of the most severe one in report.findings (for the "show details" link).
+   */
+  vuln: { severity: Severity; count: number; index: number } | null;
 }
+
+/**
+ * Whether the vulnerability lookup ran: "ok", "partial" (some OSV requests failed) or "unavailable" (OSV.dev unreachable,
+ * so an empty cell means "not checked", not "safe").
+ */
+export type VulnCheck = "ok" | "partial" | "unavailable";
 
 const COLLAPSED_ROWS = 15;
 
@@ -57,7 +67,7 @@ function LicenceCell({ licenses }: { licenses: string[] | undefined }) {
   );
 }
 
-export default function DependencyTable({ rows }: { rows: DependencyRow[] }) {
+export default function DependencyTable({ rows, vulnCheck = "ok" }: { rows: DependencyRow[]; vulnCheck?: VulnCheck }) {
   const [expanded, setExpanded] = useState(false);
   const collapsible = rows.length > COLLAPSED_ROWS;
   // The column only appears when licence data was looked up (deps.dev) for at least one package.
@@ -91,8 +101,8 @@ export default function DependencyTable({ rows }: { rows: DependencyRow[] }) {
                   <td className={`${tdCls} whitespace-nowrap`}>
                     <span className="font-mono text-[13px] text-ink-2">{r.pkg.version}</span>
                     {r.pkg.approximate && (
-                      <span className="ml-1.5 text-xs text-subtle" title="Derived from a version range, not a lockfile">
-                        (range)
+                      <span className="ml-1.5 text-xs text-subtle" title="Estimated from a version range in the manifest because there is no lockfile">
+                        (estimated)
                       </span>
                     )}
                   </td>
@@ -118,14 +128,24 @@ export default function DependencyTable({ rows }: { rows: DependencyRow[] }) {
                     {r.vuln ? (
                       <span className="inline-flex items-center gap-2">
                         <SeverityChip severity={r.vuln.severity} />
-                        <span className="tabular text-[13px] text-ink-2">
+                        <FixFirstLink
+                          index={r.vuln.index}
+                          className="tabular inline-flex items-center gap-1 text-[13px] font-semibold text-brand hover:text-brand-strong"
+                        >
                           {r.vuln.count} {r.vuln.count === 1 ? "advisory" : "advisories"}
-                        </span>
+                          <span className="sr-only"> for {r.pkg.name}: show details</span>
+                          <ArrowRightIcon size={13} className="print:hidden" />
+                        </FixFirstLink>
+                      </span>
+                    ) : vulnCheck === "unavailable" ? (
+                      <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-warn" title="OSV.dev could not be reached during the scan">
+                        <AlertIcon size={14} />
+                        Not checked
                       </span>
                     ) : (
                       <span className="inline-flex items-center gap-1.5 text-[13px] text-subtle">
                         <CheckIcon size={14} className="text-ok" />
-                        None known
+                        {vulnCheck === "partial" ? "None found (check incomplete)" : "None known"}
                       </span>
                     )}
                   </td>

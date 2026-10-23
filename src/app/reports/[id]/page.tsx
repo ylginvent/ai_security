@@ -11,6 +11,7 @@ import {
   DownloadIcon,
   FileIcon,
   SpinnerIcon,
+  InfoIcon,
   XCircleIcon,
 } from "@/components/icons";
 import { ScoreRing } from "@/components/Score";
@@ -29,13 +30,30 @@ import {
   formatNumber,
   humanize,
   shortHash,
+  shortPath,
+  suppressionInfo,
 } from "@/lib/format";
 import { AI_ACT_LABEL, ALL_QUESTIONS, SECTIONS, answerLabel, isSkill, isVisible } from "@/lib/questionnaire";
-import { DECISION_LABEL, PASS_SCORE } from "@/lib/scoring";
+import { DECISION_LABEL, PASS_SCORE, suppressionOf, trustScore } from "@/lib/scoring";
 import { getStore } from "@/lib/store";
-import { SEVERITIES, type AuditEvent, type Decision, type Finding, type PackageRef, type Report, type ScannerId, type Severity, type Submission } from "@/lib/types";
+import {
+  SCAN_EMPTY_RULE,
+  SCAN_INCOMPLETE_RULE,
+  SEVERITIES,
+  type AuditEvent,
+  type Decision,
+  type Finding,
+  type GateResult,
+  type PackageRef,
+  type Report,
+  type ScannerId,
+  type ScannerRun,
+  type Severity,
+  type Submission,
+} from "@/lib/types";
 import { findingAnchor } from "./anchors";
-import DependencyTable, { type DependencyRow } from "./DependencyTable";
+import AutoRefresh from "./AutoRefresh";
+import DependencyTable, { type DependencyRow, type VulnCheck } from "./DependencyTable";
 import FindingsExplorer from "./FindingsExplorer";
 import FixFirstLink from "./FixFirstLink";
 import PrintButton from "./PrintButton";
@@ -76,22 +94,109 @@ function escapeRegExp(s: string) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** Links dependency findings to packages by name (title first, then snippet and description). */
+/**
+ * Dependency findings that are not about a known vulnerability (licences, deprecation, lockfiles, lookup errors).
+ * Vulnerability findings use the advisory id (GHSA-…, CVE-…, PYSEC-…) as rule id.
+ */
+const NON_VULN_DEP_RULES = new Set([
+  "osv-unavailable",
+  "unpinned-python-dependencies",
+  "license-copyleft",
+  "license-unknown",
+  "deprecated-package",
+  "no-lockfile",
+]);
+
+function isVulnFinding(f: Finding): boolean {
+  return f.scanner === "dependencies" && !NON_VULN_DEP_RULES.has(f.ruleId);
+}
+
+/**
+ * Links vulnerability findings to packages. Prefers an exact "name@version" / "name version" match (so two versions of
+ * one package are not mixed up), then falls back to a whole-word name match in title, snippet and description.
+ */
 function dependencyRows(packages: PackageRef[], findings: Finding[]): DependencyRow[] {
-  const deps = findings.filter((f) => f.scanner === "dependencies");
+  const deps = findings.map((f, index) => ({ f, index })).filter((x) => isVulnFinding(x.f));
   const rows = packages.map((pkg): DependencyRow => {
     if (!pkg.name || deps.length === 0) return { pkg, vuln: null };
     const re = new RegExp(`(^|[^A-Za-z0-9_.@/-])${escapeRegExp(pkg.name)}($|[^A-Za-z0-9_/-])`, "i");
-    const hits = deps.filter((f) => re.test(f.title) || (f.snippet ? re.test(f.snippet) : false) || re.test(f.description));
+    const byName = deps.filter(({ f }) => re.test(f.title) || (f.snippet ? re.test(f.snippet) : false) || re.test(f.description));
+    const exact = byName.filter(({ f }) => f.description.includes(`${pkg.name}@${pkg.version}`) || f.title.startsWith(`${pkg.name} ${pkg.version}`));
+    const hits = exact.length ? exact : byName;
     if (!hits.length) return { pkg, vuln: null };
-    const severity = hits.reduce<Severity>((best, f) => (SEV_RANK[f.severity] < SEV_RANK[best] ? f.severity : best), "info");
-    return { pkg, vuln: { severity, count: hits.length } };
+    const worst = hits.reduce((best, x) => (SEV_RANK[x.f.severity] < SEV_RANK[best.f.severity] ? x : best), hits[0]);
+    return { pkg, vuln: { severity: worst.f.severity, count: hits.length, index: worst.index } };
   });
   return rows.sort((a, b) => {
     const va = a.vuln ? SEV_RANK[a.vuln.severity] : 9;
     const vb = b.vuln ? SEV_RANK[b.vuln.severity] : 9;
-    return va - vb || a.pkg.name.localeCompare(b.pkg.name);
+    return va - vb || a.pkg.name.localeCompare(b.pkg.name, "en");
   });
+}
+
+function vulnCheckState(report: Report): VulnCheck {
+  const run = report.scanners.find((sc) => sc.id === "dependencies");
+  if (!run || run.status !== "error") return "ok";
+  return report.findings.some((f) => f.scanner === "dependencies" && f.ruleId === "osv-unavailable") ? "unavailable" : "partial";
+}
+
+/**
+ * Findings that make a gate fail, mirroring the predicates in lib/scoring.ts `evaluate()`.
+ * Gates without findings behind them (EU AI Act, trust score) are not listed.
+ */
+const GATE_FINDINGS: Record<string, (f: Finding) => boolean> = {
+  "no-secrets": (f) => f.scanner === "secrets" && (f.severity === "critical" || f.severity === "high"),
+  "no-malicious-models": (f) => f.scanner === "model" && f.severity === "critical",
+  "no-critical": (f) => f.severity === "critical",
+  "no-high": (f) => f.severity === "high",
+  "scan-complete": (f) => f.ruleId === SCAN_INCOMPLETE_RULE || f.ruleId === SCAN_EMPTY_RULE,
+  exceptions: (f) => {
+    const s = suppressionOf(f);
+    return s !== null && s.by !== "test-code" && (s.originalSeverity === "critical" || s.originalSeverity === "high");
+  },
+};
+
+/** Plain-language "what to do" per failed gate. */
+function gateAction(g: GateResult, report: Report): string | null {
+  switch (g.id) {
+    case "no-secrets":
+      return "Delete the credentials from the code and its git history, revoke and reissue (rotate) them, and load them at runtime from environment variables or Azure Key Vault. Removing them from the code alone is not enough: anyone with the old copy can still use them.";
+    case "no-malicious-models":
+      return "Don't ship model files that run code when they are loaded. Re-export the model in a safe format such as safetensors or ONNX, or download it from a trusted source and verify its checksum.";
+    case "no-critical":
+      return "Fix every critical finding listed below. Each one blocks publication on its own.";
+    case "ai-act":
+      return g.blocking
+        ? "The declared use case is a prohibited AI practice under the EU AI Act and can't be published. If your answers in the questionnaire are wrong, correct them and submit again; otherwise contact the AI governance board."
+        : "High-risk AI systems need approval from the AI governance board. A reviewer will pick this up; make sure the questionnaire answers on human oversight, logging and data governance are complete.";
+    case "no-high":
+      return "Fix the high-severity findings, or explain in your resubmission why the risk is acceptable so a reviewer can sign off.";
+    case "score": {
+      const withoutHigh = trustScore(report.findings.filter((f) => f.severity !== "critical" && f.severity !== "high"));
+      const withoutMedium = trustScore(report.findings.filter((f) => f.severity === "low" || f.severity === "info"));
+      if (withoutHigh >= PASS_SCORE)
+        return `Every finding lowers the score; critical and high findings weigh most. Fixing the critical and high findings would bring the score to about ${withoutHigh}, above the ${PASS_SCORE} needed.`;
+      return `Every finding lowers the score; critical and high findings weigh most, and repeats of the same issue weigh less. Fixing the critical and high findings would bring it to about ${withoutHigh}; also fixing the medium findings would bring it to about ${withoutMedium} (${PASS_SCORE} needed).`;
+    }
+    case "scan-complete":
+      return g.blocking
+        ? "Nothing in the upload could be scanned. Upload the source code itself (a zip without node_modules, virtual environments or build output, or a public Git link) and submit again."
+        : "Part of the upload was not checked automatically (see the findings below). Fix the cause if you can, for example a smaller zip or a reachable lockfile, and submit again; otherwise a reviewer assesses what was not covered.";
+    case "exceptions":
+      return "You marked serious findings as exceptions in .aigateignore or with an inline comment. A reviewer has to confirm each one; add a short reason to every exception so they can.";
+    default:
+      return null;
+  }
+}
+
+/** What made the scan less than complete: failed scanners, skipped files, suppressed findings. */
+function scanGaps(report: Report): { failed: ScannerRun[]; skippedFiles: number; totalFiles: number; suppressed: number } {
+  return {
+    failed: report.scanners.filter((sc) => sc.status === "error"),
+    skippedFiles: report.stats?.filesSkipped ?? 0,
+    totalFiles: report.stats?.filesTotal ?? 0,
+    suppressed: report.findings.filter((f) => suppressionInfo(f) !== null).length,
+  };
 }
 
 function answerSeverity(qId: string, value: string | string[] | undefined): Severity | null {
@@ -110,15 +215,21 @@ function findingLocation(f: Finding): string | null {
   return f.line ? `${f.file}:${f.line}` : f.file;
 }
 
+/** True when this finding on its own makes a blocking gate fail. */
+function blocksPublication(f: Finding): boolean {
+  return f.severity === "critical" || GATE_FINDINGS["no-secrets"](f) || GATE_FINDINGS["no-malicious-models"](f);
+}
+
 /**
- * The three findings to fix first: most severe first (info excluded). Within one severity,
- * findings from a rule that is not yet in the list win over repeats of the same rule.
+ * The three findings to fix first: most severe first (info excluded). Within one severity, findings that block
+ * publication come first (a high-severity secret blocks, other high findings don't), then findings from a rule that
+ * is not yet in the list win over repeats of the same rule.
  */
-function fixFirst(findings: Finding[]): { f: Finding; index: number }[] {
+function fixFirst(findings: Finding[]): { f: Finding; index: number; blocking: boolean }[] {
   const ranked = findings
-    .map((f, index) => ({ f, index }))
+    .map((f, index) => ({ f, index, blocking: blocksPublication(f) }))
     .filter((x) => x.f.severity !== "info")
-    .sort((a, b) => SEV_RANK[a.f.severity] - SEV_RANK[b.f.severity] || a.index - b.index);
+    .sort((a, b) => SEV_RANK[a.f.severity] - SEV_RANK[b.f.severity] || Number(b.blocking) - Number(a.blocking) || a.index - b.index);
   const seen = new Set<string>();
   const withRepeat = ranked.map((x) => {
     const rule = `${x.f.scanner}:${x.f.ruleId}`;
@@ -127,9 +238,20 @@ function fixFirst(findings: Finding[]): { f: Finding; index: number }[] {
     return { ...x, repeat };
   });
   return withRepeat
-    .sort((a, b) => SEV_RANK[a.f.severity] - SEV_RANK[b.f.severity] || a.repeat - b.repeat || a.index - b.index)
+    .sort(
+      (a, b) =>
+        SEV_RANK[a.f.severity] - SEV_RANK[b.f.severity] || Number(b.blocking) - Number(a.blocking) || a.repeat - b.repeat || a.index - b.index,
+    )
     .slice(0, 3)
-    .map(({ f, index }) => ({ f, index }));
+    .map(({ f, index, blocking }) => ({ f, index, blocking }));
+}
+
+/** First sentence of a text, for compact previews. */
+function firstSentence(text: string, max = 160): string {
+  const t = text.trim();
+  const m = /^(.+?[.!?])(\s|$)/.exec(t);
+  const s = m ? m[1] : t;
+  return s.length > max ? `${s.slice(0, max - 1).trimEnd()}…` : s;
 }
 
 const ACTION_LABEL: Record<string, string> = {
@@ -233,6 +355,8 @@ export default async function ReportPage({ params }: Props) {
 
       <Hero s={s} report={report} />
 
+      {report && <ScanNotice report={report} />}
+
       {report && report.skills && report.skills.length > 0 ? <SkillFeedback skills={report.skills} /> : null}
 
       <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_340px] print:block">
@@ -245,9 +369,13 @@ export default async function ReportPage({ params }: Props) {
                   id="findings-title"
                   title="Findings"
                   meta={report.findings.length}
-                  description="Everything the scanners and the questionnaire flagged. Open a finding to see what it means and how to fix it."
+                  description="Everything the scanners and the questionnaire flagged, most severe first. Open a finding to see what is wrong, where it is and how to fix it."
                 />
-                <FindingsExplorer findings={report.findings} scanners={scannerOptions(report)} />
+                <FindingsExplorer
+                  findings={report.findings}
+                  scanners={scannerOptions(report)}
+                  incomplete={report.scanners.some((sc) => sc.status === "error")}
+                />
               </Card>
               <CoverageCard report={report} />
               <DependenciesCard report={report} />
@@ -335,11 +463,15 @@ function heroMessage(s: Submission, report: Report, decision: Decision): string 
   if (s.review_status === "approved") {
     return `Approved by ${s.reviewer ?? "the reviewer"}. The ${noun} can now be published to the Azure AI catalogue.`;
   }
-  const failedBlocking = report.gates.filter((g) => g.blocking && !g.passed).length;
+  const blockingGates = report.gates.filter((g) => g.blocking && !g.passed);
+  const failedBlocking = blockingGates.length;
   const failedOther = report.gates.filter((g) => !g.blocking && !g.passed).length;
   const counts = s.counts ?? countFindings(report.findings);
   if (decision === "blocked") {
-    return `This ${noun} can't be published yet: ${plural(failedBlocking, "blocking check")} failed. Fix the issues listed here, then submit a new version.`;
+    const names = blockingGates.map((g) => `“${g.label}”`).join(", ");
+    return failedBlocking > 0
+      ? `This ${noun} can't be published yet: ${plural(failedBlocking, "blocking check")} failed (${names}). Start with the “Fix first” list, then submit a new version.`
+      : `This ${noun} can't be published yet. Fix the issues listed here, then submit a new version.`;
   }
   if (decision === "conditional") {
     if (skill) {
@@ -368,19 +500,30 @@ function Hero({ s, report }: { s: Submission; report: Report | null }) {
 
   let pill: ReactNode;
   let message: ReactNode;
+  let cta: ReactNode = null;
   if (report && decision) {
     pill = DECISION_LABEL[decision];
-    message = heroMessage(s, report, decision);
+    const text = heroMessage(s, report, decision);
+    const partial = report.scanners.some((sc) => sc.status === "error") && s.catalog_status !== "published";
+    message = partial ? `${text} Part of the scan did not finish, so the result may change when you submit again.` : text;
   } else if (s.status === "failed") {
     pill = "Scan failed";
     message = (
       <span role="alert">
-        {s.error ?? "An unexpected error occurred while scanning the upload."} Check that the upload is a valid zip archive or source file, then{" "}
-        <Link href="/submit" className="font-semibold text-brand hover:text-brand-strong">
-          submit it again
-        </Link>
-        .
+        {s.error ?? "An unexpected error occurred while scanning the upload. Check that the upload is a valid zip archive or source file."}{" "}
+        Your questionnaire answers are kept in this browser, so you only need to provide the code again.
       </span>
+    );
+    cta = (
+      <div className="mt-4 flex flex-wrap gap-2 print:hidden">
+        <Link href="/submit" className={btn.primary}>
+          Submit again
+          <ArrowRightIcon size={16} />
+        </Link>
+        <Link href="/" className={btn.secondary}>
+          Back to overview
+        </Link>
+      </div>
     );
   } else if (s.status === "scanning") {
     pill = (
@@ -391,11 +534,12 @@ function Hero({ s, report }: { s: Submission; report: Report | null }) {
     );
     message = (
       <span role="status">
-        The automated scan is still running.{" "}
+        <AutoRefresh />
+        The automated scan is still running. This page updates automatically when the result is ready, or{" "}
         <Link href={`/reports/${s.id}`} className="font-semibold text-brand hover:text-brand-strong">
-          Refresh
-        </Link>{" "}
-        in a few seconds to see the result.
+          refresh now
+        </Link>
+        .
       </span>
     );
   } else {
@@ -411,7 +555,9 @@ function Hero({ s, report }: { s: Submission; report: Report | null }) {
             {report ? (
               <div className="flex shrink-0 flex-col items-center gap-1.5">
                 <ScoreRing score={s.score ?? 0} />
-                <span className="text-xs font-medium text-subtle">Trust score · pass ≥ {PASS_SCORE}</span>
+                <span className="text-xs font-medium text-subtle" aria-hidden="true">
+                  Trust score · {(s.score ?? 0) >= PASS_SCORE ? "passes" : "needs"} ≥ {PASS_SCORE}
+                </span>
               </div>
             ) : (
               <InitialsTile name={s.asset_name} size="lg" />
@@ -435,6 +581,7 @@ function Hero({ s, report }: { s: Submission; report: Report | null }) {
                 )}
               </h1>
               <p className="mt-2 max-w-2xl text-base leading-7 text-muted">{message}</p>
+              {cta}
             </div>
           </div>
 
@@ -478,7 +625,14 @@ function Hero({ s, report }: { s: Submission; report: Report | null }) {
           </dl>
         </div>
 
-        {report && <FixFirst picks={picks} total={report.findings.length} rowCls={t.row} />}
+        {report && (
+          <FixFirst
+            picks={picks}
+            total={report.findings.length}
+            rowCls={t.row}
+            incomplete={report.scanners.some((sc) => sc.status === "error")}
+          />
+        )}
       </div>
     </section>
   );
@@ -493,26 +647,40 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function FixFirst({ picks, total, rowCls }: { picks: { f: Finding; index: number }[]; total: number; rowCls: string }) {
+function FixFirst({
+  picks,
+  total,
+  rowCls,
+  incomplete,
+}: {
+  picks: { f: Finding; index: number; blocking: boolean }[];
+  total: number;
+  rowCls: string;
+  incomplete: boolean;
+}) {
   return (
     <div className="min-w-0 print:mt-6">
       <h2 className="font-sans text-[13px] font-bold uppercase tracking-[0.06em] text-muted">Fix first</h2>
+      {picks.length > 0 && <p className="mt-1 text-[13px] leading-5 text-muted">The most important issues. Select one to see where it is and how to fix it.</p>}
       {picks.length === 0 ? (
         <div className="mt-3 flex gap-3 rounded-xl border border-line bg-white px-4 py-4">
           <CheckCircleIcon size={20} className="shrink-0 text-ok" />
           <div>
             <p className="text-[15px] font-semibold text-ink">Nothing to fix</p>
             <p className="mt-0.5 text-[13px] text-muted">
-              {total > 0 ? "Only informational findings were reported." : "The scanners and the questionnaire came back clean."}
+              {incomplete
+                ? "Nothing was flagged, but the scan was incomplete. See the notice below."
+                : total > 0
+                  ? "Only informational findings were reported."
+                  : "The scanners and the questionnaire came back clean."}
             </p>
           </div>
         </div>
       ) : (
         <>
           <ol className="mt-3 space-y-2.5">
-            {picks.map(({ f, index }) => {
-              const ref = f.refs[0] ?? f.ruleId;
-              const where = findingLocation(f) ?? SCANNER_LABEL[f.scanner] ?? f.scanner;
+            {picks.map(({ f, index, blocking }) => {
+              const loc = findingLocation(f);
               return (
                 <li key={findingAnchor(index)}>
                   <FixFirstLink
@@ -520,17 +688,28 @@ function FixFirst({ picks, total, rowCls }: { picks: { f: Finding; index: number
                     className={`group flex items-center justify-between gap-3 rounded-xl border bg-white px-4 py-3.5 text-ink shadow-xs transition-colors ${rowCls}`}
                   >
                     <span className="flex min-w-0 flex-col gap-1">
-                      <span className="text-[15px] font-semibold leading-snug">{f.title}</span>
-                      <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-[13px] text-muted">
+                      <span className="break-words text-[15px] font-semibold leading-snug">{f.title}</span>
+                      <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[13px] text-muted">
                         <span className={`inline-flex items-center gap-1.5 font-semibold ${SEV_TEXT[f.severity]}`}>
                           <span className={`size-1.5 rounded-full ${SEV_BG[f.severity]}`} aria-hidden="true" />
                           {SEVERITY_LABEL[f.severity]}
+                          {blocking ? " · blocks publication" : ""}
                         </span>
                         <span aria-hidden="true">·</span>
-                        <span className="break-all">{ref}</span>
-                        <span aria-hidden="true">·</span>
-                        <span className="min-w-0 break-all font-mono text-xs">{where}</span>
+                        {loc ? (
+                          <span className="min-w-0 break-all font-mono text-xs" title={loc}>
+                            {shortPath(loc, 48)}
+                          </span>
+                        ) : (
+                          <span>{SCANNER_LABEL[f.scanner] ?? f.scanner}</span>
+                        )}
                       </span>
+                      {f.remediation && (
+                        <span className="text-[13px] leading-5 text-ink-2">
+                          <span className="font-semibold">Fix: </span>
+                          {firstSentence(f.remediation)}
+                        </span>
+                      )}
                     </span>
                     <ArrowRightIcon size={18} className="shrink-0 text-brand transition-transform group-hover:translate-x-0.5 print:hidden" />
                   </FixFirstLink>
@@ -552,42 +731,154 @@ function FixFirst({ picks, total, rowCls }: { picks: { f: Finding; index: number
 
 /* ------------------------------------------------------------------ cards */
 
+const MAX_GATE_LINKS = 3;
+
 function GatesCard({ report }: { report: Report }) {
   const passed = report.gates.filter((g) => g.passed).length;
+  const failed = report.gates.length - passed;
+  // Failed blocking checks first, then failed non-blocking, then passed; otherwise keep the policy order.
+  const order = (g: GateResult) => (g.passed ? 2 : g.blocking ? 0 : 1);
+  const gates = report.gates.map((g, i) => ({ g, i })).sort((a, b) => order(a.g) - order(b.g) || a.i - b.i);
+  const indexed = report.findings.map((f, index) => ({ f, index }));
   return (
-    <Card labelledBy="gates-title" className="avoid-break">
+    <Card id="gates" labelledBy="gates-title" className="scroll-mt-24">
       <CardHeader
         id="gates-title"
-        title="Gate checks"
+        title="What's needed for approval"
         meta={`${passed}/${report.gates.length} passed`}
-        description="Blocking checks must pass before publication. A failed non-blocking check needs a reviewer's sign-off."
+        description={
+          failed === 0
+            ? "All checks pass. A security reviewer signs off next."
+            : "Every check must pass for a smooth approval. A failed blocking check stops publication until it is fixed; any other failed check needs a security reviewer's sign-off."
+        }
       />
       <ul className="divide-y divide-line">
-        {report.gates.map((g) => (
-          <li key={g.id} className="flex items-start gap-3 px-5 py-4 sm:px-6">
-            {g.passed ? (
-              <CheckCircleIcon size={20} className="shrink-0 text-ok" />
-            ) : g.blocking ? (
-              <XCircleIcon size={20} className="shrink-0 text-sev-critical" />
-            ) : (
-              <AlertIcon size={20} className="shrink-0 text-warn" />
-            )}
-            <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-sm font-medium text-ink">{g.label}</span>
-                {g.blocking && (
-                  <span className="inline-flex h-5 items-center rounded-md bg-white px-1.5 text-[11px] font-semibold text-muted ring-1 ring-inset ring-line-strong">
-                    Blocking
+        {gates.map(({ g }) => {
+          const match = GATE_FINDINGS[g.id];
+          const causes = !g.passed && match ? indexed.filter((x) => match(x.f)).sort((a, b) => SEV_RANK[a.f.severity] - SEV_RANK[b.f.severity] || a.index - b.index) : [];
+          const action = g.passed ? null : gateAction(g, report);
+          const status = g.passed ? "Passed" : g.blocking ? "Blocks publication" : "Needs reviewer sign-off";
+          return (
+            <li key={g.id} className="avoid-break flex items-start gap-3 px-5 py-4 sm:px-6">
+              {g.passed ? (
+                <CheckCircleIcon size={20} className="shrink-0 text-ok" />
+              ) : g.blocking ? (
+                <XCircleIcon size={20} className="shrink-0 text-sev-critical" />
+              ) : (
+                <AlertIcon size={20} className="shrink-0 text-warn" />
+              )}
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-medium text-ink">{g.label}</span>
+                    {g.blocking && (
+                      <span className="inline-flex h-5 items-center rounded-md bg-white px-1.5 text-[11px] font-semibold text-muted ring-1 ring-inset ring-line-strong">
+                        Blocking
+                      </span>
+                    )}
                   </span>
+                  <StatusPill tone={g.passed ? "ok" : g.blocking ? "danger" : "warn"}>{status}</StatusPill>
+                </div>
+                <p className="mt-0.5 text-[13px] leading-5 text-muted">{g.detail}</p>
+                {action && (
+                  <p className="mt-2 text-[13px] leading-5 text-ink-2">
+                    <span className="font-semibold text-ink">What to do: </span>
+                    {action}
+                  </p>
+                )}
+                {causes.length > 0 && (
+                  <div className="mt-2.5">
+                    <p className="text-xs font-medium text-subtle">Caused by</p>
+                    <ul className="mt-1 space-y-1">
+                      {causes.slice(0, MAX_GATE_LINKS).map(({ f, index }) => {
+                        const loc = findingLocation(f);
+                        return (
+                          <li key={index} className="min-w-0 text-[13px] leading-5">
+                            <FixFirstLink index={index} className="group inline-flex max-w-full items-baseline gap-1.5 text-brand hover:text-brand-strong">
+                              <ArrowRightIcon size={13} className="shrink-0 translate-y-0.5 print:hidden" />
+                              <span className="min-w-0 break-words">
+                                <span className="font-medium group-hover:underline">{f.title}</span>
+                                {loc && (
+                                  <span className="ml-1.5 break-all font-mono text-xs text-muted" title={loc}>
+                                    {shortPath(loc, 48)}
+                                  </span>
+                                )}
+                              </span>
+                            </FixFirstLink>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                    {causes.length > MAX_GATE_LINKS && (
+                      <a href="#findings" className="mt-1 inline-block text-[13px] font-semibold text-brand hover:text-brand-strong print:hidden">
+                        and {causes.length - MAX_GATE_LINKS} more in the findings list
+                      </a>
+                    )}
+                  </div>
                 )}
               </div>
-              <p className="mt-0.5 text-[13px] leading-5 text-muted">{g.detail}</p>
-            </div>
-            <StatusPill tone={g.passed ? "ok" : g.blocking ? "danger" : "warn"}>{g.passed ? "Passed" : "Failed"}</StatusPill>
-          </li>
-        ))}
+            </li>
+          );
+        })}
       </ul>
     </Card>
+  );
+}
+
+/** Tells the reader when the result is less than complete: scanner errors, skipped files, suppressed findings. */
+function ScanNotice({ report }: { report: Report }) {
+  const { failed, skippedFiles, totalFiles, suppressed } = scanGaps(report);
+  if (failed.length === 0 && skippedFiles === 0 && suppressed === 0) return null;
+  const incomplete = failed.length > 0;
+  return (
+    <section
+      aria-labelledby="scan-notice-title"
+      className={`avoid-break rounded-xl border px-5 py-4 sm:px-6 ${incomplete ? "border-[#FEDF89] bg-warn-soft" : "border-line bg-white shadow-xs"}`}
+    >
+      <h2 id="scan-notice-title" className="flex items-center gap-2 text-[15px] font-semibold text-ink">
+        {incomplete ? <AlertIcon size={18} className="shrink-0 text-warn" /> : <InfoIcon size={18} className="shrink-0 text-brand" />}
+        {incomplete ? "This scan is incomplete" : "About this scan"}
+      </h2>
+      <ul className="mt-2 space-y-2 text-[13px] leading-5 text-ink-2">
+        {failed.map((sc, i) => (
+          <li key={`${sc.id}-${i}`}>
+            <span className="font-semibold text-ink">{sc.name || SCANNER_LABEL[sc.id] || sc.id} did not finish.</span>{" "}
+            {sc.id === "dependencies"
+              ? "Known vulnerabilities in your packages were not (fully) checked, so the dependency results below may be missing issues."
+              : "Issues of this type may be missing from the report."}{" "}
+            {sc.note && <span className="break-words text-muted">Details: {sc.note}</span>}
+          </li>
+        ))}
+        {incomplete && (
+          <li>
+            The decision is based only on what was checked. Submit the same version again later to get a complete result; reviewers see this notice too.
+          </li>
+        )}
+        {skippedFiles > 0 && (
+          <li>
+            <span className="font-semibold text-ink">
+              {formatNumber(skippedFiles)}
+              {totalFiles > 0 ? ` of ${formatNumber(totalFiles)}` : ""} {skippedFiles === 1 ? "file was" : "files were"} not content-scanned
+            </span>{" "}
+            (for example <code className="font-mono text-xs">node_modules</code>, build output, binaries or files over the size limit).{" "}
+            <a href="#coverage" className="font-semibold text-brand hover:text-brand-strong">
+              See scanner coverage
+            </a>
+            .
+          </li>
+        )}
+        {suppressed > 0 && (
+          <li>
+            <span className="font-semibold text-ink">
+              {plural(suppressed, "finding was", "findings were")} downgraded to Info
+            </span>{" "}
+            because {suppressed === 1 ? "it is" : "they are"} in test or example code or marked as an exception (<code className="font-mono text-xs">nosec</code>,{" "}
+            <code className="font-mono text-xs">aigate:ignore</code>, <code className="font-mono text-xs">.aigateignore</code>). They don&apos;t count towards
+            the decision, but they stay visible in the findings list and a reviewer checks that each exception is justified.
+          </li>
+        )}
+      </ul>
+    </section>
   );
 }
 
@@ -633,8 +924,12 @@ function CoverageCard({ report }: { report: Report }) {
   ];
 
   return (
-    <Card labelledBy="coverage-title" className="avoid-break">
-      <CardHeader id="coverage-title" title="Scanner coverage" description="What was analysed, by which engine, and how long it took." />
+    <Card id="coverage" labelledBy="coverage-title" className="scroll-mt-24">
+      <CardHeader
+        id="coverage-title"
+        title="Scanner coverage"
+        description="What was analysed, by which engine, and how long it took. Skipped files are dependency and build folders, binaries, or files over the size limit."
+      />
 
       <dl className="grid grid-cols-2 gap-3 px-5 py-5 sm:grid-cols-3 sm:px-6 xl:grid-cols-6">
         {stats.map((x) => (
@@ -663,13 +958,15 @@ function CoverageCard({ report }: { report: Report }) {
                 <tr key={`${sc.id}-${i}`}>
                   <td className={`${tdc} font-medium text-ink`}>
                     {sc.name || SCANNER_LABEL[sc.id]}
-                    {sc.note && <div className="mt-0.5 text-[13px] font-normal text-subtle">{sc.note}</div>}
+                    {sc.note && (
+                      <div className={`mt-0.5 max-w-prose break-words text-[13px] font-normal ${sc.status === "error" ? "text-sev-critical" : "text-subtle"}`}>{sc.note}</div>
+                    )}
                   </td>
                   <td className={`${tdc} text-muted`}>{sc.engine}</td>
                   <td className={tdc}>
                     <StatusPill tone={status.tone}>{status.label}</StatusPill>
                   </td>
-                  <td className={`${tdc} tabular text-right ${sc.findings ? "font-semibold text-ink" : "text-faint"}`}>{sc.findings}</td>
+                  <td className={`${tdc} tabular text-right ${sc.findings ? "font-semibold text-ink" : "text-subtle"}`}>{sc.findings}</td>
                   <td className={`${tdc} tabular text-right text-muted`}>{formatDuration(sc.durationMs)}</td>
                 </tr>
               );
@@ -708,11 +1005,12 @@ function CoverageCard({ report }: { report: Report }) {
 function DependenciesCard({ report }: { report: Report }) {
   const rows = report.packages.length ? dependencyRows(report.packages, report.findings) : [];
   const vulnerable = rows.filter((r) => r.vuln).length;
+  const check = vulnCheckState(report);
   const basis = report.packages.some((p) => Array.isArray(p.licenses))
-    ? "Packages resolved from manifests and lockfiles, checked against OSV.dev; licences from deps.dev."
-    : "Packages resolved from manifests and lockfiles, checked against OSV.dev.";
+    ? "Third-party packages found in your manifests and lockfiles, checked against the OSV.dev vulnerability database; licences from deps.dev."
+    : "Third-party packages found in your manifests and lockfiles, checked against the OSV.dev vulnerability database.";
   return (
-    <Card labelledBy="deps-title">
+    <Card id="dependencies" labelledBy="deps-title" className="scroll-mt-24">
       <CardHeader
         id="deps-title"
         title="Dependencies"
@@ -722,10 +1020,17 @@ function DependenciesCard({ report }: { report: Report }) {
             <>
               {basis}{" "}
               {vulnerable > 0 ? (
-                <span className="font-medium text-sev-critical">{plural(vulnerable, "package")} with known vulnerabilities.</span>
+                <span className="font-medium text-sev-critical">
+                  {plural(vulnerable, "package")} with known vulnerabilities. Upgrade to the fixed version named in each finding.
+                </span>
+              ) : check === "unavailable" ? (
+                <span className="font-medium text-warn">The vulnerability database could not be reached, so packages were not checked.</span>
+              ) : check === "partial" ? (
+                <span className="font-medium text-warn">No known vulnerabilities found, but the check was incomplete.</span>
               ) : (
                 <span className="font-medium text-ok">No known vulnerabilities.</span>
               )}
+              {vulnerable > 0 && check !== "ok" ? <span className="font-medium text-warn"> The check was incomplete, so there may be more.</span> : null}
             </>
           ) : (
             basis
@@ -733,7 +1038,7 @@ function DependenciesCard({ report }: { report: Report }) {
         }
       />
       {rows.length ? (
-        <DependencyTable rows={rows} />
+        <DependencyTable rows={rows} vulnCheck={check} />
       ) : (
         <p className="px-5 py-8 text-center text-sm text-muted sm:px-6">No package manifests were found in the upload.</p>
       )}
@@ -771,7 +1076,7 @@ function AnswersCard({ answers }: { answers: Submission["answers"] }) {
                     <div key={q.id} className="grid gap-1 px-4 py-3 md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] md:gap-6">
                       <dt className="text-[13px] leading-5 text-muted">{q.label}</dt>
                       <dd className="flex min-w-0 items-start justify-between gap-3 text-sm leading-5 text-ink">
-                        <span className="min-w-0 whitespace-pre-line break-words">{empty ? <span className="text-faint">Not answered</span> : answerLabel(q.id, v)}</span>
+                        <span className="min-w-0 whitespace-pre-line break-words">{empty ? <span className="italic text-subtle">Not answered</span> : answerLabel(q.id, v)}</span>
                         {sev && <SeverityChip severity={sev} />}
                       </dd>
                     </div>

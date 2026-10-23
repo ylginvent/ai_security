@@ -15,16 +15,18 @@ const lines = (...l: string[]) => `${l.join("\n")}\n`;
 
 function fakeSecrets() {
   return {
-    openaiKey: ["sk", "proj", ["AiAssetGateDemo", "0000000000", "NotARealKey", "abcdefghij"].join("")].join("-"),
+    // Niet-bestaande sleutels, in stukken opgebouwd (geen push-protection-treffers in deze broncode). Ze moeten er wel
+    // echt uitzien: de secrets-scanner slaat placeholders ("xxxx", "0000", "abcdefgh") bewust over.
+    openaiKey: ["sk", "proj", ["AiAssetGateDemo", "Zq8Lw2Vn5Rb", "NotARealKey", "Jt4Hx7Kc9Pm"].join("")].join("-"),
     awsKeyId: ["AK", "IA", "DEMO", "FAKE", "KEY", "23456"].join(""),
-    awsSecret: ["DemoSecret", "NotReal", "x".repeat(23)].join(""),
+    awsSecret: ["DemoSecret", "NotReal", "Hq7Tz2Wm9Kp4Rv8Ns3Lb6Yc"].join(""),
     storageConn: [
       "DefaultEndpointsProtocol=https",
       "AccountName=contosoraghrdocs",
-      ["Account", "Key=", "Q29udG9zb0RlbW8", "x".repeat(64), "Tm90UmVhbA", "=="].join(""),
+      ["Account", "Key=", "Q29udG9zb0RlbW8", "pN3kV8qR2sT6wY0z", "B4cF7hJ9mL1nX5vA", "8dG2kQ6tU0yE3rW7", "iO9pS4aZ1xC5bM8n", "Tm90UmVhbA", "=="].join(""),
       "EndpointSuffix=core.windows.net",
     ].join(";"),
-    aoaiKey: ["dec0de", "0".repeat(20), "facade"].join(""),
+    aoaiKey: ["dec0de", "4f9a17c3b28e5d06a7f1", "facade"].join(""),
     dbPassword: ["Rag", "Demo", "2026!"].join("-"),
     sessionSecret: ["c9f2", "Kx81", "Lq0Z", "7mWd"].join(""),
   };

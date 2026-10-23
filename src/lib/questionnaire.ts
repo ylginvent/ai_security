@@ -61,7 +61,14 @@ export const SECTIONS: Section[] = [
     questions: [
       { id: "asset_name", label: "Asset name", kind: "text", required: true, placeholder: "e.g. Contract Clause Assistant" },
       { id: "asset_version", label: "Version", kind: "text", placeholder: "e.g. 1.2.0" },
-      { id: "owner_name", label: "Accountable owner", kind: "text", required: true, placeholder: "Full name" },
+      {
+        id: "owner_name",
+        label: "Accountable owner",
+        help: "The person who answers for this asset and fixes the findings. Usually the product owner or tech lead, not the submitter's manager.",
+        kind: "text",
+        required: true,
+        placeholder: "Full name",
+      },
       { id: "owner_email", label: "Owner e-mail", kind: "email", required: true, placeholder: "firstname.lastname@capgemini.com" },
       {
         id: "business_unit",
@@ -82,6 +89,7 @@ export const SECTIONS: Section[] = [
       {
         id: "asset_type",
         label: "Asset type",
+        help: "Pick the closest match. An assistant that searches your documents is RAG; one that can call tools or APIs is agentic.",
         kind: "select",
         required: true,
         options: [
@@ -172,11 +180,13 @@ export const SECTIONS: Section[] = [
       {
         id: "personal_data",
         label: "Personal data",
+        help: "Any information about an identifiable person, including names, e-mail addresses, employee IDs and free text that mentions people. Pseudonymised data is still personal data under GDPR; only truly anonymised data is not.",
         kind: "select",
         required: true,
         options: [
           { value: "none", label: "No personal data" },
-          { value: "pseudonymised", label: "Pseudonymised / anonymised only" },
+          { value: "anonymised", label: "Anonymised only (nobody can be re-identified)" },
+          { value: "pseudonymised", label: "Pseudonymised (names replaced by codes or IDs)" },
           { value: "personal", label: "Personal data (names, e-mails, HR data …)" },
           {
             value: "special",
@@ -194,6 +204,7 @@ export const SECTIONS: Section[] = [
       {
         id: "client_data",
         label: "Does it process client data?",
+        help: "Documents, records or other data that belong to a client, even when it is only used in prompts or a search index.",
         kind: "select",
         required: true,
         options: [
@@ -215,6 +226,7 @@ export const SECTIONS: Section[] = [
       {
         id: "data_flows",
         label: "Where does data flow? (select all that apply)",
+        help: "Think of every place prompts, documents, outputs and logs are sent or stored. Calling the public OpenAI, Anthropic or Google API counts as external, even with a paid account.",
         kind: "multi",
         required: true,
         options: [
@@ -257,6 +269,7 @@ export const SECTIONS: Section[] = [
       {
         id: "training_use",
         label: "Training / fine-tuning",
+        help: "Only answer yes if you trained or fine-tuned a model yourself. Indexing documents for search (RAG) is not training.",
         kind: "select",
         required: true,
         options: [
@@ -289,11 +302,12 @@ export const SECTIONS: Section[] = [
       {
         id: "retention",
         label: "Retention of prompts, outputs and logs",
+        help: "How long is stored data kept before it is deleted? Enforced means it is deleted automatically, for example by a storage lifecycle rule.",
         kind: "select",
         required: true,
         options: [
-          { value: "enforced", label: "Defined and technically enforced" },
-          { value: "defined", label: "Defined but not enforced" },
+          { value: "enforced", label: "Defined and deleted automatically" },
+          { value: "defined", label: "Defined, but not deleted automatically" },
           {
             value: "undefined",
             label: "Not defined",
@@ -310,9 +324,10 @@ export const SECTIONS: Section[] = [
       {
         id: "dpia",
         label: "Data Protection Impact Assessment (DPIA)",
+        help: "A privacy risk assessment done with the privacy office or Data Protection Officer before personal data is processed.",
         kind: "select",
         required: true,
-        showIf: (a) => a.personal_data === "personal" || a.personal_data === "special",
+        showIf: (a) => a.personal_data === "pseudonymised" || a.personal_data === "personal" || a.personal_data === "special",
         options: [
           { value: "done", label: "Completed" },
           { value: "in_progress", label: "In progress" },
@@ -340,6 +355,7 @@ export const SECTIONS: Section[] = [
       {
         id: "model_provider",
         label: "Models used (select all that apply)",
+        help: "Include every model the asset calls or ships, such as chat, embedding, reranking and classification models.",
         kind: "multi",
         required: true,
         options: [
@@ -355,6 +371,7 @@ export const SECTIONS: Section[] = [
       {
         id: "model_provenance",
         label: "Are models and versions pinned and from a trusted source?",
+        help: "Pinned means the code asks for one exact model version (for example a deployment version or a Hugging Face commit), so it cannot change without review.",
         kind: "select",
         required: true,
         showIf: (a) => Array.isArray(a.model_provider) && a.model_provider.some((p) => p !== "none"),
@@ -377,6 +394,7 @@ export const SECTIONS: Section[] = [
       {
         id: "model_format",
         label: "Format of shipped model weights",
+        help: "Model files included in your code or downloaded at runtime. Choose 'No model weights shipped' if you only call a hosted model through an API.",
         kind: "select",
         required: true,
         options: [
@@ -398,14 +416,15 @@ export const SECTIONS: Section[] = [
       },
       {
         id: "licences",
-        label: "Have model and dataset licences been reviewed for commercial use?",
+        label: "Have model, dataset and package licences been reviewed for commercial use?",
+        help: "Some open models, datasets and libraries forbid commercial use or require you to share your source code (e.g. CC-BY-NC, GPL, AGPL).",
         kind: "select",
         required: true,
         options: [
           { value: "yes", label: "Yes" },
           {
             value: "no",
-            label: "No",
+            label: "No / not sure",
             finding: {
               severity: "medium",
               title: "Licences not reviewed",
@@ -427,6 +446,7 @@ export const SECTIONS: Section[] = [
       {
         id: "exposure",
         label: "Network exposure",
+        help: "Can it be reached from the internet, or only from the Capgemini network / VPN? Public demo links (e.g. Gradio or ngrok share links) count as internet-facing.",
         kind: "select",
         required: true,
         options: [
@@ -448,6 +468,7 @@ export const SECTIONS: Section[] = [
       {
         id: "authentication",
         label: "Authentication",
+        help: "How do users or calling systems prove who they are before they can use the asset?",
         kind: "select",
         required: true,
         options: [
@@ -470,6 +491,7 @@ export const SECTIONS: Section[] = [
       {
         id: "agency",
         label: "What can the AI do on its own?",
+        help: "Choose the most powerful capability, without a human clicking to approve each step. Running generated Python, SQL or shell commands counts as executing code.",
         kind: "select",
         required: true,
         options: [
@@ -500,30 +522,9 @@ export const SECTIONS: Section[] = [
         ],
       },
       {
-        id: "human_oversight",
-        label: "Human-in-the-loop for impactful actions or decisions",
-        kind: "select",
-        required: true,
-        showIf: (a) => a.agency === "write_tools" || a.agency === "code_exec" || a.decisions_about_people === "automated",
-        options: [
-          { value: "always", label: "Always required" },
-          { value: "some", label: "For some actions" },
-          {
-            value: "none",
-            label: "No human oversight",
-            finding: {
-              severity: "high",
-              title: "Autonomous actions without human oversight",
-              detail: "The system can act without a human able to intervene.",
-              remediation: "Add approval steps for irreversible or high-impact actions and a kill switch.",
-              refs: ["OWASP LLM06:2025", "EU AI Act Art. 14"],
-            },
-          },
-        ],
-      },
-      {
         id: "rag_permissions",
         label: "Are user permissions enforced on retrieved documents?",
+        help: "Can a user only get answers from documents they are allowed to open themselves? Without this, the assistant can leak documents to the wrong people.",
         kind: "select",
         required: true,
         showIf: (a) => a.asset_type === "rag" || a.asset_type === "agent",
@@ -545,6 +546,7 @@ export const SECTIONS: Section[] = [
       {
         id: "untrusted_content",
         label: "Does it process untrusted external content (web pages, e-mails, uploaded files)?",
+        help: "Content written by someone outside your team can contain hidden instructions for the model (indirect prompt injection).",
         kind: "select",
         required: true,
         showIf: usesLlm,
@@ -574,6 +576,7 @@ export const SECTIONS: Section[] = [
       {
         id: "guardrails",
         label: "Prompt-injection / jailbreak protection",
+        help: "A filter that checks prompts and retrieved content for attempts to override the model's instructions. The default Azure OpenAI content filter alone does not count.",
         kind: "select",
         required: true,
         showIf: usesLlm,
@@ -618,6 +621,7 @@ export const SECTIONS: Section[] = [
       {
         id: "secrets_mgmt",
         label: "How are secrets and keys managed?",
+        help: "API keys, passwords and connection strings. The scan checks the code for hard-coded secrets, so answer for how it really works today.",
         kind: "select",
         required: true,
         options: [
@@ -692,6 +696,7 @@ export const SECTIONS: Section[] = [
       {
         id: "red_teaming",
         label: "Security testing / AI red-teaming",
+        help: "Has someone deliberately tried to break it, for example with jailbreak prompts or an automated tool such as PyRIT, garak or promptfoo?",
         kind: "select",
         required: true,
         options: [
@@ -713,6 +718,7 @@ export const SECTIONS: Section[] = [
       {
         id: "threat_model",
         label: "Threat model available?",
+        help: "A written overview of what could go wrong (who could attack it, how, and what protects against it). A one-page document is enough.",
         kind: "select",
         required: true,
         options: [
@@ -761,24 +767,32 @@ export const SECTIONS: Section[] = [
       {
         id: "ai_act_domains",
         label: "Is the asset intended for any of these uses? (select all that apply)",
+        help: "These uses are regulated by the EU AI Act. Some are banned outright (Art. 5); the others are high risk (Annex III) and need extra approval. Most assets fall under 'None of these'.",
         kind: "multi",
         required: true,
         options: [
           { value: "none", label: "None of these" },
-          { value: "social_scoring", label: "Social scoring of people" },
-          { value: "manipulation", label: "Manipulative or exploitative techniques" },
-          { value: "emotion_work", label: "Emotion recognition at work or in education" },
-          { value: "biometric", label: "Biometric identification or categorisation" },
-          { value: "employment", label: "Recruitment, HR or worker management" },
-          { value: "education", label: "Education: admission or assessment" },
-          { value: "essential_services", label: "Access to essential services (credit, insurance, benefits)" },
-          { value: "critical_infra", label: "Safety component of critical infrastructure" },
-          { value: "law_enforcement", label: "Law enforcement, migration or justice" },
+          // Art. 5: verboden praktijken
+          { value: "social_scoring", label: "Social scoring: rating people on their behaviour or personality, leading to unfair treatment" },
+          { value: "manipulation", label: "Manipulative or deceptive techniques, or exploiting age, disability or social situation, that can cause significant harm" },
+          { value: "emotion_work", label: "Recognising emotions of employees or students (except for medical or safety reasons)" },
+          { value: "biometric_sensitive", label: "Inferring race, political views, religion, sexual orientation or union membership from biometric data" },
+          { value: "facial_scraping", label: "Building face-recognition databases by scraping images from the internet or CCTV" },
+          { value: "predictive_policing", label: "Predicting whether someone will commit a crime based only on profiling or personality" },
+          { value: "realtime_rbi", label: "Real-time remote biometric identification in public spaces for law enforcement" },
+          // Annex III: hoog risico
+          { value: "biometric", label: "Other biometric identification, categorisation or emotion recognition" },
+          { value: "employment", label: "Recruitment, promotion, termination, task allocation or performance monitoring of workers" },
+          { value: "education", label: "Education: admission, grading, assessing level or proctoring exams" },
+          { value: "essential_services", label: "Access to essential services: credit scoring, life or health insurance pricing, public benefits, emergency triage" },
+          { value: "critical_infra", label: "Safety component of critical infrastructure (energy, water, gas, heating, road traffic, digital infrastructure)" },
+          { value: "law_enforcement", label: "Law enforcement, migration, asylum, border control, justice or elections" },
         ],
       },
       {
         id: "decisions_about_people",
         label: "Does the output influence decisions about individuals?",
+        help: "For example who is hired, promoted, approved for a loan or flagged for an investigation.",
         kind: "select",
         required: true,
         options: [
@@ -798,8 +812,33 @@ export const SECTIONS: Section[] = [
         ],
       },
       {
+        // Toont zich bij acties in systemen, code-uitvoering of volledig geautomatiseerde besluiten (agency staat in "Architecture & agency").
+        id: "human_oversight",
+        label: "Does a human approve impactful actions or decisions?",
+        help: "You see this question because the AI can take actions in other systems, run code or decide about people on its own. Human-in-the-loop means a person can check and stop the action before it takes effect.",
+        kind: "select",
+        required: true,
+        showIf: (a) => a.agency === "write_tools" || a.agency === "code_exec" || a.decisions_about_people === "automated",
+        options: [
+          { value: "always", label: "Always required" },
+          { value: "some", label: "For some actions" },
+          {
+            value: "none",
+            label: "No human oversight",
+            finding: {
+              severity: "high",
+              title: "Autonomous actions without human oversight",
+              detail: "The system can act without a human able to intervene.",
+              remediation: "Add approval steps for irreversible or high-impact actions and a kill switch.",
+              refs: ["OWASP LLM06:2025", "EU AI Act Art. 14"],
+            },
+          },
+        ],
+      },
+      {
         id: "transparency",
         label: "Are users told they interact with AI / is AI content labelled?",
+        help: "For example a line in the chat window ('You are chatting with an AI assistant') or a label on generated text, images or audio.",
         kind: "select",
         required: true,
         options: [
@@ -821,6 +860,7 @@ export const SECTIONS: Section[] = [
       {
         id: "documentation",
         label: "Model / system card documenting purpose, limitations and evaluation",
+        help: "A short document (or README section) that tells others what the asset is for, what it should not be used for, and how well it performs.",
         kind: "select",
         required: true,
         options: [
@@ -864,7 +904,9 @@ export const SECTIONS: Section[] = [
 
 export const ALL_QUESTIONS: Question[] = SECTIONS.flatMap((s) => s.questions);
 
-const PROHIBITED = ["social_scoring", "manipulation", "emotion_work"];
+/** EU AI Act Art. 5. */
+const PROHIBITED = ["social_scoring", "manipulation", "emotion_work", "biometric_sensitive", "facial_scraping", "predictive_policing", "realtime_rbi"];
+/** EU AI Act Annex III. */
 const HIGH_RISK = ["biometric", "employment", "education", "essential_services", "critical_infra", "law_enforcement"];
 
 export function aiActTier(a: Answers): AiActTier {
@@ -942,8 +984,8 @@ export function questionnaireFindings(a: Answers): Finding[] {
       ruleId: "Q.ai_act",
       severity: "critical",
       title: "Use case is a prohibited AI practice under the EU AI Act",
-      description: "Social scoring, manipulative techniques and emotion recognition at work/education are banned since 2 February 2025.",
-      remediation: "This asset cannot be published. Involve Legal & Compliance.",
+      description: `The declared use (${answerLabel("ai_act_domains", (Array.isArray(a.ai_act_domains) ? a.ai_act_domains : []).filter((x) => PROHIBITED.includes(x)))}) is a prohibited practice under Art. 5 of the EU AI Act, banned since 2 February 2025. Narrow exceptions exist (e.g. medical or safety reasons for emotion recognition, authorised law-enforcement use), but they need a legal assessment.`,
+      remediation: "This asset cannot be published. Involve Legal & Compliance. If the answer was a mistake, correct it and submit again.",
       refs: ["EU AI Act Art. 5"],
     });
   } else if (tier === "high") {

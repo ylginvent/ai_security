@@ -67,6 +67,9 @@
   html {
     -webkit-text-size-adjust: 100%;
     scrollbar-gutter: stable;
+    /* The palette is light-only: stop browsers in OS dark mode from rendering dark form controls,
+       scrollbars and autofill on the white surfaces (which made some text unreadable). */
+    color-scheme: light;
   }
 
   body {
@@ -149,6 +152,17 @@
   .avoid-break {
     break-inside: avoid;
     page-break-inside: avoid;
+  }
+  h2,
+  h3,
+  h4 {
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+  pre,
+  code {
+    white-space: pre-wrap !important;
+    overflow-wrap: anywhere;
   }
   details::details-content {
     content-visibility: visible;

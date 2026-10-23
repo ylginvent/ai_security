@@ -92,6 +92,16 @@ interface FrontField {
   value: string;
   /** 1-based regelnummer in SKILL.md. */
   line: number;
+  /** Ongequote waarde die een echte YAML-parser anders leest dan bedoeld (": " of " #"). */
+  yamlIssue?: string;
+}
+
+/** Plain (ongequote) YAML-scalars: ": " is ongeldig, " #" begint commentaar en kapt de waarde af. */
+function plainScalarIssue(value: string): string | undefined {
+  if (/^["'[{|>]/.test(value)) return undefined;
+  if (/:\s/.test(value)) return 'contains ": " without quotes, which makes the YAML frontmatter invalid for strict parsers';
+  if (/\s#/.test(value)) return 'contains " #" without quotes, so YAML treats the rest as a comment and drops it';
+  return undefined;
 }
 
 interface Frontmatter {
@@ -170,6 +180,13 @@ function parseFrontmatter(lines: string[]): Frontmatter | null {
       if (raw === "") value = joined;
       else if (/^\[.*\]$/.test(joined)) value = splitTools(joined.slice(1, -1)).join(", ");
       else value = unquote(joined);
+      if (raw !== "") {
+        const yamlIssue = plainScalarIssue(joined);
+        if (yamlIssue) {
+          fields.set(key, { value, line, yamlIssue });
+          continue;
+        }
+      }
     }
     fields.set(key, { value, line });
   }
@@ -229,7 +246,7 @@ const WHEN_TO_USE =
   /\buse (?:this|it|when|for|to|if|whenever|on|during)\b|\bwhen (?:the )?(?:user|users|you|working|asked|handling|dealing|processing|creating|editing|reviewing|analy[sz]ing|needed|requested|a user)\b|\bwhenever\b|\btrigger(?:s|ed)? (?:when|on|by|for)\b|\bfor [a-z]+ing\b|\bapplies (?:when|to)\b|\buseful (?:when|for)\b|\b(?:ideal|best|intended|designed) for\b/i;
 const FIRST_PERSON = /^\s*(?:I|I'm|I'll|we|we'll|you|you'll|let me|let's)\b|\b(?:I can|I will|I'll|I help|I am|we can|you can use me)\b/i;
 const TIME_SENSITIVE =
-  /\b(?:as of|since|until|till|before|after|by)\s+(?:(?:early|mid|late|the end of|end of)\s+)?(?:(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|q[1-4]|h[12])[\s,-]+)?(?:19|20)\d{2}\b|\bcurrently\b|\bat the time of writing\b|\bas of (?:today|now|this writing)\b|\bright now\b|\b(?:this|next|last) (?:year|month|quarter)\b|\bthe (?:latest|newest) version\b/i;
+  /\b(?:as of|since|until|till|before|after|by)\s+(?:(?:early|mid|late|the end of|end of)\s+)?(?:(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|q[1-4]|h[12])[\s,-]+)?(?:19|20)\d{2}\b|\bat the time of writing\b|\bas of (?:today|now|this writing)\b|\b(?:this|next|last) (?:year|month|quarter)\b|\bthe (?:latest|newest) version\b/i;
 const LEGACY_HEADING = /^#{1,6}\s+.*\b(?:old|legacy|deprecated|changelog|change log|history|previous versions?)\b/i;
 const WORKFLOW_HEADING = /^#{1,6}\s+.*\b(?:examples?|workflow|steps|usage|how to|instructions|process|procedure|quick ?start|getting started)\b/i;
 const TOC = /^#{1,6}\s*(?:table of )?contents\b/im;
@@ -309,6 +326,7 @@ function hasErrorHandling(file: SourceFile): boolean {
 
 type SecId =
   | "hidden-unicode"
+  | "hidden-instructions"
   | "prompt-injection"
   | "exfiltration"
   | "credential-access"
@@ -340,12 +358,21 @@ const SEC: Record<SecId, SecDef> = {
     refs: ["OWASP LLM01:2025", "CVE-2021-42574", "CWE-1007"],
     pass: "No zero-width, bidirectional-control or tag characters found in the skill files.",
   },
+  "hidden-instructions": {
+    label: "No instructions hidden in HTML comments",
+    severity: "medium",
+    title: "Instructions for the agent hidden in an HTML comment",
+    risk: "HTML comments are invisible when SKILL.md or a reference file is rendered (GitHub, the catalogue, markdown previews), but the agent reads the raw text. Instructions placed there escape human review, which makes comments a known hiding place for prompt injections.",
+    remediation: "Move the instruction into the visible text so users and reviewers can see it, or delete it. Notes meant only for maintainers belong in a separate file that SKILL.md does not reference, because everything in SKILL.md is loaded into the agent's context.",
+    refs: ["OWASP LLM01:2025", "MITRE ATLAS AML.T0051"],
+    pass: "No agent-directed instructions hidden in HTML comments.",
+  },
   "prompt-injection": {
     label: "No prompt-injection or instruction-override text",
     severity: "high",
     title: "Instruction-override text in skill",
     risk: "Skill instructions are loaded into the agent's context with the same authority as the user's request. Text that tells the model to ignore earlier instructions, hide actions from the user or bypass safeguards is a prompt-injection payload that hijacks every agent that loads the skill.",
-    remediation: "Remove the instruction. A skill must describe a task; it must never override system or user instructions or conceal actions from the user. If the text is an attack example (e.g. in a security-testing skill), quote it in a clearly labelled example file.",
+    remediation: "Remove the instruction. A skill must describe a task; it must never override system or user instructions or conceal actions from the user. If the text is a deliberate attack example (e.g. in a security-testing skill), move it to a clearly labelled example file and put an <!-- aigate:ignore --> comment on the line above it, so the reviewer can confirm the exception.",
     refs: ["OWASP LLM01:2025", "MITRE ATLAS AML.T0051"],
     pass: "No instruction-override, concealment or jailbreak phrases found.",
   },
@@ -445,8 +472,12 @@ interface LineRule {
 
 const CRED_PATHS =
   /~\/\.ssh\b|\$HOME\/\.ssh\b|\.ssh\/(?:id_[a-z0-9]+|authorized_keys|config)\b|\bid_(?:rsa|ed25519|ecdsa|dsa)\b|\.aws\/(?:credentials|config)\b|\.azure\/(?:accessTokens\.json|msal_token_cache)|\.kube\/config\b|\.docker\/config\.json|\.netrc\b|\.git-credentials\b|\.npmrc\b|\.pypirc\b|\bLogin Data\b|(?:Chrome|Chromium|Firefox|Edge|Brave|Mozilla)[^\n]{0,60}\bCookies\b|cookies\.sqlite|security\s+find-(?:generic|internet)-password/i;
+/**
+ * De volledige omgeving serialiseren of afdrukken. Bewust níet: os.environ.copy(), dict(os.environ),
+ * {**os.environ, …} en env=os.environ: dat is het gangbare patroon om een subprocess te starten.
+ */
 const ENV_DUMP =
-  /\bdict\s*\(\s*os\.environ\s*\)|\bos\.environ\.(?:copy|items|keys|values)\s*\(|\{\s*\*\*os\.environ|json\.dumps\s*\(\s*os\.environ|\bos\.environ\s*[,)}\]]|\bprintenv\b|\$\(\s*env\s*\)|`env`|\benv\s*\||JSON\.stringify\s*\(\s*process\.env\s*\)|Object\.(?:entries|keys|values)\s*\(\s*process\.env\s*\)|Get-ChildItem\s+env:/i;
+  /json\.dumps\s*\(\s*(?:dict\s*\(\s*)?os\.environ\b|\bstr\s*\(\s*os\.environ\s*\)|\bprintenv\b|\$\(\s*env\s*\)|`env`|^\s*env\s*(?:\||>|$)|JSON\.stringify\s*\(\s*process\.env\s*\)|Get-ChildItem\s+env:/im;
 const READ_DOTENV = /(?:\bcat|\bopen|read_?text|readFileSync|readFile|Get-Content|\bsource)\s*\(?\s*['"]?(?:[\w~.$\/-]*\/)?\.env(?:\.\w+)?['"]?(?=\s|\)|,|;|$)/i;
 const SEND =
   /\b(?:requests|httpx|session|client|aiohttp)\.(?:post|put|patch)\s*\(|\burllib\.request\.urlopen\s*\(|\burlopen\s*\(\s*(?:urllib\.request\.)?Request\s*\(|\baxios\.(?:post|put)\s*\(|\bfetch\s*\(|\bcurl\b[^\n]*(?:\s-d\b|\s--data|\s-F\b|\s--form\b|\s-T\b|\s--upload-file\b|-X\s*POST)|\bwget\b[^\n]*--post-(?:data|file)|\bInvoke-(?:RestMethod|WebRequest)\b[^\n]*-Method\s+(?:Post|Put)/i;
@@ -465,7 +496,8 @@ const LINE_RULES: LineRule[] = [
   {
     check: "prompt-injection",
     target: "doc",
-    pattern: /\byou\s+are\s+now\s+(?:a|an|in|the|no\s+longer|free|unrestricted|DAN|operating|acting|allowed|jailbroken)\b/i,
+    // Geen "you are now in the project folder": alleen identiteits- of vrijheidswissels
+    pattern: /\byou\s+are\s+now\s+(?:a|an|no\s+longer|free|unrestricted|uncensored|unfiltered|DAN|allowed|jailbroken)\b/i,
     what: "tries to give the model a new identity (\"you are now …\")",
   },
   {
@@ -484,9 +516,17 @@ const LINE_RULES: LineRule[] = [
     check: "prompt-injection",
     target: "doc",
     pattern: /\bbypass(?:ing)?\s+(?:the\s+|any\s+|all\s+)?(?:safety|security|guardrails?|content\s+(?:filters?|polic(?:y|ies))|filters?|restrictions?|permissions?|approvals?|polic(?:y|ies)|moderation)\b/i,
+    // "does not bypass security", "never bypass", "without bypassing": een verbod, geen opdracht
+    unless: /\b(?:never|not|don'?t|cannot|can'?t|without|no)\s+(?:\w+\s+)?bypass/i,
     what: "tells the model to bypass safeguards",
   },
-  { check: "prompt-injection", target: "doc", pattern: /\bjailbr(?:ea|o)k/i, what: "contains jailbreak language" },
+  {
+    // Alleen jailbreak-opdrachten, niet elke vermelding ("protects against jailbreaks")
+    check: "prompt-injection",
+    target: "doc",
+    pattern: /\byou\s+are\s+(?:now\s+)?jailbroken\b|\b(?:enable|activate|enter|switch\s+to)\s+(?:the\s+)?(?:jailbreak|DAN|developer)\s+mode\b|\bjailbreak\s+mode\b|\bdo\s+anything\s+now\b/i,
+    what: "contains a jailbreak instruction",
+  },
   { check: "prompt-injection", target: "doc", pattern: /\b(?:reveal|print|output|repeat|leak)\s+(?:your|the)\s+(?:full\s+)?system\s+prompt\b/i, what: "asks the model to leak its system prompt" },
   { check: "prompt-injection", target: "doc", pattern: /<\|im_(?:start|end)\|>|<\|system\|>|\[\/?INST\]|<<SYS>>/, what: "contains raw chat-template control tokens" },
 
@@ -511,7 +551,14 @@ const LINE_RULES: LineRule[] = [
       /\b(?:send|upload|post|forward|transmit|copy|sync|share|report)\b[^.\n]{0,60}\b(?:conversation|chat history|transcript|environment variables|env vars|\.env\b|credentials|secrets|api keys?|access tokens?|ssh keys?|passwords?|the user'?s? files)\b[^.\n]{0,60}\b(?:to|via)\b[^.\n]{0,40}(?:https?:\/\/|webhook|external|remote server|endpoint|pastebin|discord|telegram)/i,
     what: "instructs the agent to send sensitive data to an external destination",
   },
-  { check: "exfiltration", target: "any", pattern: /\bexfiltrat/i, what: "mentions exfiltrating data" },
+  {
+    // Een opdracht om te exfiltreren, niet een verbod of detectie ("never exfiltrate", "detects exfiltration")
+    check: "exfiltration",
+    target: "any",
+    pattern: /\bexfiltrat(?:e|es|ing)\s+(?:the\s+|all\s+|any\s+|their\s+|user\s+|this\s+)?(?:data|files?|secrets?|credentials?|tokens?|keys?|conversations?|environment|env|passwords?|documents?)\b/i,
+    unless: /\b(?:never|not|no|don'?t|cannot|can'?t|prevent\w*|detect\w*|block\w*|avoid\w*|against|protect\w*|guard\w*|stop\w*)\b/i,
+    what: "instructs the agent to exfiltrate data",
+  },
 
   /* credential stores */
   { check: "credential-access", target: "any", pattern: CRED_PATHS, what: "reads SSH keys, cloud credential files or browser credential stores" },
@@ -519,7 +566,7 @@ const LINE_RULES: LineRule[] = [
   {
     check: "credential-access",
     target: "any",
-    pattern: /\bprintenv\b|\bdict\s*\(\s*os\.environ\s*\)|\bos\.environ\.(?:copy|items|keys|values)\s*\(|\{\s*\*\*os\.environ|json\.dumps\s*\(\s*os\.environ|JSON\.stringify\s*\(\s*process\.env\s*\)|Object\.(?:entries|keys|values)\s*\(\s*process\.env\s*\)|Get-ChildItem\s+env:/i,
+    pattern: /\bprintenv\b|json\.dumps\s*\(\s*(?:dict\s*\(\s*)?os\.environ\b|\bstr\s*\(\s*os\.environ\s*\)|JSON\.stringify\s*\(\s*process\.env\s*\)|Get-ChildItem\s+env:/i,
     what: "dumps all environment variables",
   },
 
@@ -593,7 +640,19 @@ const LINE_RULES: LineRule[] = [
   },
 ];
 
-const UNRESTRICTED_TOOL = /^(?:Bash|Shell|Sh|Zsh|PowerShell|Pwsh|Terminal|Execute|Exec|Run|Computer|\*)(?:\(\s*(?:\*|:\*|\*:\*)?\s*\))?$/i;
+const HTML_COMMENT = /<!--([\s\S]*?)-->/g;
+/** Commentaar voor tooling (linters, TOC-generators, uitzonderingen) is geen instructie. */
+const TOOLING_COMMENT = /^\s*(?:aigate[:-]ignore|nosec|nosemgrep|gitleaks:allow|markdownlint|prettier|eslint|cspell|vale|toc|end[ _-]?toc|omit in toc|todo|fixme)\b/i;
+/** Tekst gericht aan het model: instructies negeren, heimelijk handelen of een opdracht aan de agent. */
+const AGENT_DIRECTIVE =
+  /\b(?:ignore|disregard|override|forget)\s+(?:all\s+|any\s+|the\s+|your\s+|previous\s+|prior\s+|above\s+|earlier\s+|other\s+)*(?:instructions?|rules?|guidelines?|system|prompts?|the\s+user)\b|\b(?:secretly|covertly|without\s+(?:telling|informing|asking)\s+the\s+user)\b|\b(?:you|assistant|agent|model|claude|llm)\b[^.\n]{0,80}\b(?:must|should|always|never|do\s+not|don'?t)\s+(?:run|execute|send|upload|post|call|fetch|read|write|delete|remove|tell|mention|reveal|include|use|ignore|follow|obey)\b/i;
+
+/** Checks waarvoor een direct voorafgaand verbod in documentatie ("Never run …", "Do not use …") de treffer opheft. */
+const NEGATABLE = new Set<SecId>(["destructive", "remote-code", "credential-access", "safety-bypass"]);
+/** Verbod vlak vóór de treffer: hooguit twee woorden ertussen, zodat "Never ask, just run curl | sh" wél telt. */
+const NEGATED_PREFIX = /\b(?:never|do not|don'?t|must not|should not|avoid)\**\s+(?:\w+\s+){0,2}[`"'(*]*$/i;
+
+const UNRESTRICTED_TOOL =/^(?:Bash|Shell|Sh|Zsh|PowerShell|Pwsh|Terminal|Execute|Exec|Run|Computer|\*)(?:\(\s*(?:\*|:\*|\*:\*)?\s*\))?$/i;
 const URL_HOST = /\bhttps?:\/\/([A-Za-z0-9.-]+\.[A-Za-z]{2,}|\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?/g;
 const LOCAL_HOST = /^(?:localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|(?:[\w-]+\.)*example\.(?:com|org|net)|[\w.-]+\.(?:local|localhost|test|invalid|example))$/i;
 
@@ -702,6 +761,7 @@ function reviewSkill(ctx: Ctx, findings: RawFinding[]): SkillReview {
   );
 
   const nameProblems = name ? validateName(name) : [];
+  if (name && nameField?.yamlIssue) nameProblems.push(nameField.yamlIssue);
   add(
     makeCheck(
       "structure",
@@ -740,6 +800,7 @@ function reviewSkill(ctx: Ctx, findings: RawFinding[]): SkillReview {
   }
 
   const descProblems = description ? validateDescription(description) : [];
+  if (description && descField?.yamlIssue) descProblems.push(descField.yamlIssue);
   add(
     makeCheck(
       "structure",
@@ -747,7 +808,7 @@ function reviewSkill(ctx: Ctx, findings: RawFinding[]): SkillReview {
       "Valid description in frontmatter",
       description !== null && !descProblems.length,
       !description ? "The frontmatter has no (or an empty) description field." : descProblems.length ? `The description ${descProblems.join("; ")}.` : `The description is ${description.length} characters long.`,
-      "Add a description of at most 1024 characters, without XML tags, that says what the skill does and when to use it.",
+      "Add a description of at most 1024 characters, without XML tags, that says what the skill does and when to use it. Wrap it in double quotes if it contains a colon followed by a space.",
     ),
     10,
   );
@@ -769,7 +830,7 @@ function reviewSkill(ctx: Ctx, findings: RawFinding[]): SkillReview {
         "skill-description-invalid",
         "SKILL.md frontmatter: description is invalid",
         `The description of ${where} ${descProblems.join("; ")}. Agent Skills runtimes reject or truncate such descriptions.`,
-        "Shorten the description to at most 1024 characters and remove any XML tags.",
+        "Keep the description under 1024 characters without XML tags, and wrap it in double quotes if it contains \": \" or \" #\" (e.g. description: \"Summarises invoices: totals, VAT and due dates. Use when …\").",
         skillFile,
         descField?.line ?? 1,
         lines,
@@ -1051,7 +1112,11 @@ function reviewSkill(ctx: Ctx, findings: RawFinding[]): SkillReview {
         if (firstInvisible < 0) firstInvisible = i;
       }
       for (const r of rules) {
-        if (r.pattern.test(l) && !(r.unless && r.unless.test(l))) addHit({ check: r.check, file: f, line: i + 1, text: l, what: r.what });
+        const m = r.pattern.exec(l);
+        if (!m || (r.unless && r.unless.test(l))) continue;
+        // In documentatie is "Never run `rm -rf /`" een verbod, geen opdracht
+        if (!isScript && NEGATABLE.has(r.check) && NEGATED_PREFIX.test(l.slice(0, m.index))) continue;
+        addHit({ check: r.check, file: f, line: i + 1, text: l, what: r.what });
       }
       if (isScript) {
         if (sendLine < 0 && SEND.test(l)) sendLine = i;
@@ -1062,6 +1127,21 @@ function reviewSkill(ctx: Ctx, findings: RawFinding[]): SkillReview {
       }
     });
     if (invisible) invisibleHits.push({ file: f, line: firstInvisible + 1, text: flines[firstInvisible] ?? "", count: invisible });
+    // HTML-commentaar is onzichtbaar in gerenderde markdown, maar het model leest het wel
+    if ((f.ext === ".md" || f.ext === ".mdx") && f.text.includes("<!--")) {
+      for (const m of f.text.matchAll(HTML_COMMENT)) {
+        const content = m[1] ?? "";
+        if (TOOLING_COMMENT.test(content) || !AGENT_DIRECTIVE.test(content)) continue;
+        const line = f.text.slice(0, m.index ?? 0).split("\n").length;
+        addHit({
+          check: "hidden-instructions",
+          file: f,
+          line,
+          text: flines[line - 1] ?? "",
+          what: "hides instructions for the agent in an HTML comment that is invisible when the markdown is rendered",
+        });
+      }
+    }
     // Script dat de omgeving of credentials verzamelt én iets verstuurt: exfiltratie
     if (isScript && sendLine >= 0 && (ENV_DUMP.test(f.text) || CRED_PATHS.test(f.text))) {
       addHit({
@@ -1104,7 +1184,7 @@ function reviewSkill(ctx: Ctx, findings: RawFinding[]): SkillReview {
     if (first) addHit({ check: "network-access", file: first.file, line: first.line, text: first.text, what: `contacts ${plural(hosts.length, "external host")}: ${listShort(hosts, 10)}` });
   }
 
-  const secIds: SecId[] = ["hidden-unicode", "prompt-injection", "exfiltration", "credential-access", "remote-code", "destructive", "obfuscation", "unrestricted-tools", "safety-bypass", "network-access"];
+  const secIds: SecId[] = ["hidden-unicode", "hidden-instructions", "prompt-injection", "exfiltration", "credential-access", "remote-code", "destructive", "obfuscation", "unrestricted-tools", "safety-bypass", "network-access"];
   for (const id of secIds) {
     const def = SEC[id];
     const list = hits.filter((h) => h.check === id).sort((a, b) => (a.file.path === b.file.path ? a.line - b.line : a.file.path < b.file.path ? -1 : 1));

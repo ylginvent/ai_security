@@ -1,8 +1,12 @@
 import type { Answers } from "./types";
 
 /**
- * Example intake answers for the bundled demo application (contoso-rag-assistant.zip).
+ * Example intake answers for the bundled demo application (contoso-rag-assistant.zip, built in sample.ts).
  * Deliberately moderately risky so the report shows a realistic mix of questionnaire findings.
+ * Three answers are optimistic on purpose, so the "Answers vs. code" check has something to show:
+ * - agency "read_tools", while app/agent.py gives the model a Python REPL and exec()s its output;
+ * - secrets_mgmt "key_vault", while app/config.py and .env contain (fake) credentials;
+ * - exposure "internal", while app/ui.py opens a public Gradio share link.
  * Only option values that exist in questionnaire.ts are used.
  */
 export const DEMO_ANSWERS: Answers = {
@@ -13,7 +17,7 @@ export const DEMO_ANSWERS: Answers = {
   owner_email: "marta.kowalski@capgemini.com",
   business_unit: "ind",
   description:
-    "Knowledge assistant for the Contoso account team. Answers consultant questions over engagement documents indexed from SharePoint and project wikis, cites its sources, and can create follow-up tasks in Jira on request.",
+    "HR policy assistant for Contoso employees. Answers questions about leave, expenses and payroll from the HR policy library (retrieval-augmented generation), and lets HR analysts ask for ad-hoc headcount reports in natural language.",
   asset_type: "rag",
   lifecycle: "pilot",
   intended_users: "client",
@@ -34,17 +38,16 @@ export const DEMO_ANSWERS: Answers = {
   licences: "yes",
 
   // Architecture & agency
-  exposure: "internet_auth",
+  exposure: "internal",
   authentication: "api_key",
-  agency: "write_tools",
-  human_oversight: "some",
+  agency: "read_tools",
   rag_permissions: "not_enforced",
   untrusted_content: "yes",
 
   // Security controls
   guardrails: "none",
   output_filtering: "partial",
-  secrets_mgmt: "env",
+  secrets_mgmt: "key_vault",
   logging: "basic",
   rate_limiting: "no",
   red_teaming: "planned",

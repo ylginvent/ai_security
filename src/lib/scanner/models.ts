@@ -1,6 +1,6 @@
 import JSZip from "jszip";
 import { gunzipSync, inflateSync } from "node:zlib";
-import { decodeUtf8, LIMITS, MODEL_EXTENSIONS, type Archive, type RawFinding, type ScannerResult, type SourceFile } from "./archive";
+import { decodeUtf8, errorMessage, LIMITS, MODEL_EXTENSIONS, readZipEntry, type Archive, type RawFinding, type ScannerResult, type SourceFile } from "./archive";
 
 /**
  * Model artefact scanning in de stijl van ModelScan (Protect AI): pickle-opcodes worden
@@ -12,17 +12,30 @@ const REFS = ["CWE-502", "OWASP LLM03:2025", "MITRE ATLAS AML.T0011"];
 /* -------------------------------------------------------- unsafe / safe globals */
 
 const ALL = "*";
-const BUILTIN_DANGER = ["eval", "exec", "compile", "open", "getattr", "__import__", "apply", "breakpoint", "execfile", "input"];
+const BUILTIN_DANGER = [
+  "eval", "exec", "compile", "open", "getattr", "setattr", "delattr", "globals", "locals", "vars",
+  "__import__", "apply", "breakpoint", "execfile", "input",
+];
+const OPERATOR_DANGER = ["attrgetter", "methodcaller"];
 
-/** ModelScan's unsafe-globals lijst (module → functies, of "*" voor de hele module). */
+/** ModelScan/picklescan unsafe-globals lijst (module → functies, of "*" voor de hele module). */
 const UNSAFE: Record<string, string[] | typeof ALL> = {
   builtins: BUILTIN_DANGER,
   __builtin__: BUILTIN_DANGER,
-  os: ALL, posix: ALL, nt: ALL, subprocess: ALL, sys: ALL, socket: ALL, shutil: ALL,
-  runpy: ALL, pty: ALL, webbrowser: ALL, httplib: ALL, "http.client": ALL,
-  "requests.api": ALL, "aiohttp.client": ALL, importlib: ALL, pickle: ALL, _pickle: ALL,
-  bdb: ALL, pdb: ALL, asyncio: ALL, code: ALL, commands: ALL, ctypes: ALL,
-  operator: ["attrgetter", "methodcaller"],
+  os: ALL, posix: ALL, nt: ALL, subprocess: ALL, _posixsubprocess: ALL, sys: ALL, socket: ALL, shutil: ALL,
+  runpy: ALL, pty: ALL, webbrowser: ALL, httplib: ALL, "http.client": ALL, "urllib.request": ALL, ftplib: ALL, smtplib: ALL, telnetlib: ALL,
+  "requests.api": ALL, "aiohttp.client": ALL, importlib: ALL, pickle: ALL, _pickle: ALL, dill: ALL, marshal: ALL,
+  bdb: ALL, pdb: ALL, asyncio: ALL, code: ALL, codeop: ALL, commands: ALL, ctypes: ALL, multiprocessing: ALL, pip: ALL,
+  operator: OPERATOR_DANGER,
+  _operator: OPERATOR_DANGER,
+  types: ["FunctionType", "CodeType", "LambdaType", "MethodType"],
+  io: ["open", "FileIO", "open_code"],
+  _io: ["open", "FileIO", "open_code"],
+  platform: ["popen"],
+  pydoc: ["pipepager", "tempfilepager", "pager"],
+  "numpy.testing._private.utils": ["runstring"],
+  "torch.hub": ALL,
+  "torch.serialization": ["load"],
 };
 
 const SAFE_EXACT = new Set([
@@ -70,6 +83,8 @@ interface WalkResult {
   /** Alle pickle-streams volledig geparsed? */
   complete: boolean;
   error?: string;
+  /** Offset van bytes na de laatste herkende stream (bijv. ruwe tensor-data of een aangeplakte payload). */
+  trailing?: number;
 }
 
 class Truncated extends Error {}
@@ -282,7 +297,7 @@ export function walkPickle(b: Uint8Array): WalkResult {
         }
       }
     }
-    return { globals, complete: true };
+    return p < b.length ? { globals, complete: true, trailing: p } : { globals, complete: true };
   } catch (e) {
     return { globals, complete: false, error: e instanceof Error ? e.message : String(e) };
   }
@@ -339,17 +354,29 @@ interface PickleSource {
   bytes: Uint8Array;
 }
 
+/**
+ * Entries uit een zip-gebaseerd modelbestand (torch, .keras, .npz) met een limiet op de totale
+ * uitgepakte grootte, zodat een zip-bomb in een modelbestand de scan niet kan laten crashen.
+ */
+async function zipEntries(b: Uint8Array, match: (name: string) => boolean): Promise<PickleSource[]> {
+  const zip = await JSZip.loadAsync(b);
+  const out: PickleSource[] = [];
+  let budget = LIMITS.maxModelBytes * 2;
+  for (const entry of Object.values(zip.files)) {
+    if (entry.dir || !match(entry.name)) continue;
+    const bytes = await readZipEntry(entry, budget);
+    if (bytes === null) throw new Error(`${entry.name} decompresses to more than ${Math.round((LIMITS.maxModelBytes * 2) / 1048576)} MB`);
+    budget -= bytes.length;
+    out.push({ label: entry.name, bytes });
+  }
+  return out;
+}
+
 /** Pickle-streams in een bestand: direct, gecomprimeerd (joblib) of binnen een torch-zip. */
 async function pickleSources(file: SourceFile, b: Uint8Array): Promise<PickleSource[] | null> {
   if (isZipBytes(b)) {
     if (file.ext === ".keras" || file.ext === ".npz") return null;
-    const zip = await JSZip.loadAsync(b);
-    const out: PickleSource[] = [];
-    for (const entry of Object.values(zip.files)) {
-      if (entry.dir || !/\.pkl$/i.test(entry.name)) continue;
-      out.push({ label: entry.name, bytes: await entry.async("uint8array") });
-    }
-    return out;
+    return zipEntries(b, (name) => /\.pkl$/i.test(name));
   }
   if (b[0] === 0x80) return [{ label: "", bytes: b }];
   const opts = { maxOutputLength: LIMITS.maxModelBytes * 2 };
@@ -369,10 +396,10 @@ async function scanPickleFile(file: SourceFile, b: Uint8Array): Promise<RawFindi
       {
         scanner: "model",
         ruleId: "pickle-unparsed",
-        severity: "low",
+        severity: "medium",
         title: "Pickle-based model file could not be parsed",
-        description: "The file has a pickle-family extension but its content is not a recognisable pickle stream (unknown compression or format), so it could not be verified to be free of executable payloads.",
-        remediation: "Re-export the model in safetensors or ONNX format, or provide it uncompressed so it can be inspected.",
+        description: "The file has a pickle-family extension but its content is not a recognisable pickle stream (for example joblib with lz4/xz/bz2 compression, or an unknown format), so it could not be verified to be free of code that runs when the file is loaded.",
+        remediation: "Re-export the model in safetensors or ONNX format, or save it uncompressed (joblib.dump without compress, or with compress=\"zlib\"/\"gzip\") so it can be inspected.",
         refs: REFS,
         file: file.path,
       },
@@ -388,6 +415,9 @@ async function scanPickleFile(file: SourceFile, b: Uint8Array): Promise<RawFindi
     if (!res.complete) {
       partial = true;
       globals = globals.concat(heuristicGlobals(src.bytes));
+    } else if (res.trailing !== undefined) {
+      // Data na de laatste stream (legacy torch.save: tensor-bytes) op bekende payload-patronen controleren
+      globals = globals.concat(heuristicGlobals(src.bytes.subarray(res.trailing)));
     }
     for (const g of globals) {
       const v = classify(g.module, g.name);
@@ -444,9 +474,8 @@ async function scanPickleFile(file: SourceFile, b: Uint8Array): Promise<RawFindi
 async function scanKeras(file: SourceFile, b: Uint8Array): Promise<RawFinding[]> {
   let hay = b;
   if (isZipBytes(b)) {
-    const zip = await JSZip.loadAsync(b);
-    const cfg = zip.file("config.json");
-    hay = cfg ? await cfg.async("uint8array") : new Uint8Array(0);
+    const cfg = await zipEntries(b, (name) => name === "config.json");
+    hay = cfg.length ? cfg[0].bytes : new Uint8Array(0);
   }
   const found = ['"class_name": "Lambda"', '"class_name":"Lambda"', '\\"class_name\\": \\"Lambda\\"'].some((n) => indexOfBytes(hay, n) >= 0);
   if (!found) return [];
@@ -470,15 +499,15 @@ function npyObjectDtype(b: Uint8Array): boolean {
   const len = major === 1 ? b[8] | (b[9] << 8) : (b[8] | (b[9] << 8) | (b[10] << 16) | (b[11] << 24)) >>> 0;
   const start = major === 1 ? 10 : 12;
   const header = latin1(b, start, Math.min(b.length, start + len, start + 4096));
-  return /['"]descr['"]\s*:\s*['"][|<>=]?O/.test(header);
+  // Enkelvoudig ('|O') of binnen een structured dtype ([('a', '<f4'), ('b', 'O')])
+  return /['"]descr['"]\s*:\s*(?:['"][|<>=]?O|\[[^\]]*['"][|<>=]?O\d*['"])/.test(header);
 }
 
 async function scanNumpy(file: SourceFile, b: Uint8Array): Promise<RawFinding[]> {
   const hits: string[] = [];
   if (file.ext === ".npz" && isZipBytes(b)) {
-    const zip = await JSZip.loadAsync(b);
-    for (const entry of Object.values(zip.files)) {
-      if (!entry.dir && entry.name.endsWith(".npy") && npyObjectDtype(await entry.async("uint8array"))) hits.push(entry.name);
+    for (const entry of await zipEntries(b, (name) => name.endsWith(".npy"))) {
+      if (npyObjectDtype(entry.bytes)) hits.push(entry.label);
     }
   } else if (npyObjectDtype(b)) hits.push(file.name);
   if (!hits.length) return [];
@@ -496,7 +525,91 @@ async function scanNumpy(file: SourceFile, b: Uint8Array): Promise<RawFinding[]>
   ];
 }
 
+/* -------------------------------------------- safetensors / vermomde pickles */
+
+const isRecord = (x: unknown): x is Record<string, unknown> => typeof x === "object" && x !== null && !Array.isArray(x);
+
+/** Pickle protocol 2–5 begint met PROTO (0x80) gevolgd door het protocolnummer. */
+const looksLikePickle = (b: Uint8Array) => b.length > 2 && b[0] === 0x80 && b[1] >= 2 && b[1] <= 5;
+
+/** Formaten die géén code uitvoeren bij laden — tenzij het bestand in werkelijkheid een pickle is. */
+const DISGUISE_EXT = new Set([".safetensors", ".onnx", ".gguf", ".pb", ".h5", ".npy"]);
+
+/** Valideert de safetensors-header: 8 bytes lengte (LE), JSON-header, tensor-offsets binnen het bestand. */
+function safetensorsProblem(b: Uint8Array): string | undefined {
+  if (b.length < 8) return "the file is shorter than the 8-byte safetensors header";
+  let n = 0;
+  for (let i = 7; i >= 0; i--) n = n * 256 + b[i];
+  if (n < 2 || n > 100 * 1048576 || 8 + n > b.length) return `the declared header length (${n} bytes) does not fit in the ${b.length}-byte file`;
+  let header: unknown;
+  try {
+    header = JSON.parse(decodeUtf8(b.subarray(8, 8 + n)));
+  } catch {
+    return "the JSON header cannot be parsed";
+  }
+  if (!isRecord(header)) return "the header is not a JSON object";
+  const dataLen = b.length - 8 - n;
+  for (const [name, t] of Object.entries(header)) {
+    if (name === "__metadata__") continue;
+    const label = name.length > 60 ? `${name.slice(0, 59)}…` : name;
+    if (!isRecord(t) || typeof t.dtype !== "string" || !Array.isArray(t.shape) || !Array.isArray(t.data_offsets) || t.data_offsets.length !== 2) {
+      return `tensor "${label}" has an invalid header entry`;
+    }
+    const [start, end] = t.data_offsets as unknown[];
+    if (typeof start !== "number" || typeof end !== "number" || start < 0 || end < start || end > dataLen) {
+      return `tensor "${label}" points outside the file's data section`;
+    }
+  }
+  return undefined;
+}
+
+function scanSafetensors(file: SourceFile, b: Uint8Array): RawFinding[] {
+  const problem = safetensorsProblem(b);
+  if (!problem) return [];
+  return [
+    {
+      scanner: "model",
+      ruleId: "safetensors-invalid",
+      severity: "medium",
+      title: "Malformed safetensors file",
+      description: `The file has a .safetensors extension but ${problem}. A valid safetensors file is an 8-byte header length, a JSON header describing each tensor, then the raw tensor data. A malformed file is corrupt, truncated or not really safetensors, so its safety cannot be confirmed and loaders may fail or misbehave on it.`,
+      remediation: "Re-export the weights with safetensors.torch.save_file (or save_pretrained(..., safe_serialization=True)) from the original model and upload the new file.",
+      refs: REFS,
+      file: file.path,
+    },
+  ];
+}
+
+function disguisedPickle(file: SourceFile): RawFinding {
+  return {
+    scanner: "model",
+    ruleId: "pickle-disguised",
+    severity: "high",
+    title: `Pickle data disguised as a ${file.ext} file`,
+    description: `${file.name} has a ${file.ext} extension, which normally indicates a format that cannot run code, but its content is a Python pickle (or a PyTorch archive containing one). Loading it with the matching pickle-based loader executes whatever the pickle imports. Mislabelled model files are a known way to slip unsafe artefacts past reviews.`,
+    remediation: `Find out how this file was produced. Re-export the weights to a real ${file.ext === ".safetensors" ? "safetensors" : "non-executable"} file (for PyTorch: safetensors.torch.save_file) and remove the mislabelled file.`,
+    refs: REFS,
+    file: file.path,
+  };
+}
+
 const PICKLE_EXT = new Set([".pkl", ".pickle", ".joblib", ".dill", ".pt", ".pth", ".ckpt", ".bin"]);
+/** Formaten waarin code bij laden kan zitten en die we inspecteren. */
+const INSPECTED_EXT = new Set([...Array.from(PICKLE_EXT), ".h5", ".keras", ".npy", ".npz"]);
+
+function notInspected(file: SourceFile, reason: string): RawFinding {
+  const pickle = PICKLE_EXT.has(file.ext);
+  return {
+    scanner: "model",
+    ruleId: "model-not-inspected",
+    severity: pickle ? "medium" : "low",
+    title: `Model artefact could not be inspected (${file.name})`,
+    description: `${reason} ${pickle ? "It uses a pickle-capable format, so it may contain code that runs when the model is loaded, and that could not be ruled out." : "It uses a format that can embed executable layers or pickled objects, and that could not be ruled out."}`,
+    remediation: "Publish the weights in safetensors (or ONNX) format, or attach a ModelScan / picklescan report for this file to the submission so the reviewer can verify it.",
+    refs: REFS,
+    file: file.path,
+  };
+}
 
 export async function scanModels(archive: Archive): Promise<ScannerResult> {
   const models = archive.files.filter((f) => MODEL_EXTENSIONS.has(f.ext));
@@ -508,28 +621,32 @@ export async function scanModels(archive: Archive): Promise<ScannerResult> {
   for (const file of models) {
     const b = file.bytes;
     if (!b) {
-      if (PICKLE_EXT.has(file.ext) && file.size > 0) {
-        findings.push({
-          scanner: "model",
-          ruleId: "model-not-inspected",
-          severity: "low",
-          title: "Model artefact too large to inspect",
-          description: `This ${file.ext} file (${Math.round(file.size / 1048576)} MB) exceeds the ${LIMITS.maxModelBytes / 1048576} MB inspection limit. It uses a pickle-capable format, so it may contain code that runs on load and could not be verified.`,
-          remediation: "Publish large weights in safetensors format, or attach a ModelScan / picklescan report for this file to the submission.",
-          refs: REFS,
-          file: file.path,
-        });
+      if (INSPECTED_EXT.has(file.ext) && file.size > 0) {
+        const mb = Math.max(1, Math.round(file.size / 1048576));
+        findings.push(
+          notInspected(
+            file,
+            file.size > LIMITS.maxModelBytes
+              ? `This ${file.ext} file (${mb} MB) exceeds the ${LIMITS.maxModelBytes / 1048576} MB inspection limit.`
+              : `This ${file.ext} file was not read because the upload's total size limit was reached or the archive entry could not be decompressed.`,
+          ),
+        );
       }
       continue;
     }
     try {
       inspected++;
       if (PICKLE_EXT.has(file.ext)) findings.push(...(await scanPickleFile(file, b)));
-      else if (file.ext === ".h5" || file.ext === ".keras") findings.push(...(await scanKeras(file, b)));
+      else if (DISGUISE_EXT.has(file.ext) && (looksLikePickle(b) || (isZipBytes(b) && ((await pickleSources(file, b)) ?? []).length > 0))) {
+        findings.push(disguisedPickle(file), ...(await scanPickleFile(file, b)));
+      } else if (file.ext === ".h5" || file.ext === ".keras") findings.push(...(await scanKeras(file, b)));
       else if (file.ext === ".npy" || file.ext === ".npz") findings.push(...(await scanNumpy(file, b)));
-      // safetensors, onnx, gguf, pb: geen code-uitvoering bij laden → alleen geteld
+      else if (file.ext === ".safetensors") findings.push(...scanSafetensors(file, b));
+      // onnx, gguf, pb: geen code-uitvoering bij laden → alleen geteld
     } catch (e) {
-      failures.push(`${file.path}: ${e instanceof Error ? e.message : String(e)}`);
+      const msg = errorMessage(e);
+      failures.push(`${file.path}: ${msg}`);
+      if (INSPECTED_EXT.has(file.ext)) findings.push(notInspected(file, `The ${file.ext} file could not be parsed (${msg}).`));
     }
   }
   const notes = [`${inspected} of ${models.length} model file(s) inspected.`];

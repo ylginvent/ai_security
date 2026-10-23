@@ -40,20 +40,23 @@ const RULES: Rule[] = [
     question: "secrets_mgmt",
     claims: (a) => a.secrets_mgmt === "managed_identity" || a.secrets_mgmt === "key_vault",
     evidence: (f) => f.scanner === "secrets" && (f.severity === "critical" || f.severity === "high"),
-    title: "Answers say secrets live in Key Vault, but credentials were found in the code",
-    why: "The intake claims managed identities or Key Vault, but hard-coded credentials are present in the upload.",
-    remediation: "Rotate the exposed credentials and load them from Key Vault or use a managed identity.",
+    title: "Answers say secrets are kept in Key Vault or a managed identity, but credentials were found in the code",
+    why: "The intake says no keys are stored in the code, but the secret scanner found hard-coded credentials in the upload.",
+    remediation: "Revoke and replace (rotate) the exposed credentials, remove them from the code and the Git history, and load them from Key Vault or use a managed identity, as your answer states.",
     refs: ["CWE-798"],
   },
   {
     id: "agency",
     severity: "high",
     question: "agency",
-    claims: (a) => a.agency === "text" || a.agency === "read_tools",
-    evidence: rule("ai-code-execution-tool", "ai-llm-output-execution", "ai-dangerous-langchain-flag"),
-    title: "Answers say the AI cannot act, but the code can execute code or commands",
-    why: "The intake describes a text-only or read-only system, but the code gives the model code-execution capabilities.",
-    remediation: "Remove the execution capability or sandbox it, and update the agency answer so the right controls are assessed.",
+    // Alles behalve "code_exec" (ook write_tools) sluit uitvoeren van door het model gegenereerde code uit
+    claims: (a) => !has(a, "agency", "code_exec"),
+    // allow_dangerous_deserialization (FAISS.load_local e.d.) is een laadrisico, geen agency: niet als bewijs tellen
+    evidence: (f) =>
+      rule("ai-code-execution-tool", "ai-llm-output-execution")(f) || (f.ruleId === "ai-dangerous-langchain-flag" && !/deserializ/i.test(f.title)),
+    title: "Answers say the AI cannot execute code, but the code lets it run code or commands",
+    why: "The intake does not declare code execution, but the code lets the model run generated code, shell commands or free-form queries. A prompt injection can then run commands with the application's permissions.",
+    remediation: "Remove the execution capability or run it in an isolated sandbox without credentials or network access. If the capability is intended, change the agency answer to code execution so the right controls are assessed.",
     refs: ["OWASP LLM06:2025", "OWASP LLM05:2025"],
   },
   {

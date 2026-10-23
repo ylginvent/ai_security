@@ -20,7 +20,7 @@ export const metadata: Metadata = {
   robots: { index: false, follow: false },
 };
 
-export const viewport: Viewport = { themeColor: "#FFFFFF" };
+export const viewport: Viewport = { themeColor: "#FFFFFF", colorScheme: "light" };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   const demoMode = getStore().kind === "memory";
@@ -66,7 +66,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         <footer className="border-t border-line bg-white print:hidden">
           <div className="mx-auto flex max-w-[1280px] flex-col gap-1 px-4 py-5 text-[13px] text-subtle sm:flex-row sm:items-center sm:justify-between sm:px-6 lg:px-8">
             <span>Scanners use open-source rulesets and OSV.dev vulnerability data. Uploaded code is never executed.</span>
-            <span>Demo environment</span>
+            {demoMode && <span>Demo environment</span>}
           </div>
         </footer>
       </body>

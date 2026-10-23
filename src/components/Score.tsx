@@ -33,7 +33,12 @@ export function ScoreRing({ score, size = 104 }: { score: number; size?: number 
   const tickInner = r - stroke / 2 - 1;
   const tickOuter = r + stroke / 2 + 1;
   return (
-    <div className="relative shrink-0" style={{ width: size, height: size }} role="img" aria-label={`Trust score ${score} out of 100`}>
+    <div
+      className="relative shrink-0"
+      style={{ width: size, height: size }}
+      role="img"
+      aria-label={`Trust score ${score} out of 100, ${score >= PASS_SCORE ? "passes" : "below"} the ${PASS_SCORE} needed`}
+    >
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} aria-hidden="true">
         <circle cx={cx} cy={cx} r={r} fill="none" stroke="#EAECF0" strokeWidth={stroke} />
         <circle

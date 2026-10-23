@@ -86,6 +86,29 @@ const KIND_OPTIONS: { value: Kind; title: string; text: string; meta: string[] }
 
 const FORMAT_CHIPS = [".zip", ".py", ".ipynb", ".ts", ".js", ".tf"];
 
+/** Archive formats the scanner cannot unpack: without this check they would be scanned as one opaque file and pass "clean". */
+const OTHER_ARCHIVES = new Set([".tar", ".gz", ".tgz", ".bz2", ".xz", ".zst", ".7z", ".rar"]);
+/** Documents, media and executables that contain no source code to scan. */
+const NOT_CODE = new Set([
+  ".exe", ".dll", ".msi", ".dmg", ".iso", ".apk",
+  ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp3", ".mp4", ".mov",
+]);
+
+function extensionOf(name: string): string {
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot).toLowerCase() : "";
+}
+
+/** Explains why a file cannot be scanned for this kind of submission, or returns null when it is fine. */
+function unsupportedFileReason(f: File, kind: Kind): string | null {
+  const ext = extensionOf(f.name);
+  if (OTHER_ARCHIVES.has(ext)) return `${ext} archives cannot be scanned. Compress the folder as a .zip file and upload that instead.`;
+  if (NOT_CODE.has(ext)) return "This file type contains no source code to scan. Upload a .zip of your project, or a single source file.";
+  if (kind === "skill" && ext !== ".zip" && ext !== ".md") return "Upload the skill folder as a .zip file (or only its SKILL.md), so the review can see all of its files.";
+  return null;
+}
+
 const AFTER_SUBMIT_REST = [
   {
     title: "Gate decision",
@@ -148,12 +171,21 @@ type UploadInfo =
   | { mode: "storage"; supabaseUrl: string; publishableKey: string; bucket: string; path: string; token: string }
   | { mode: "inline"; maxBytes: number };
 
+/** Idempotency-Key for POST /api/submissions (16-100 characters of [A-Za-z0-9_-]). */
+function newIdempotencyKey(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  return `k${Date.now().toString(36)}${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+}
+
 class ApiError extends Error {
   fields?: Record<string, string>;
-  constructor(message: string, fields?: Record<string, string>) {
+  /** HTTP status of the failed request (0 when the error was detected in the browser). */
+  status: number;
+  constructor(message: string, fields?: Record<string, string>, status = 0) {
     super(message);
     this.name = "ApiError";
     this.fields = fields;
+    this.status = status;
   }
 }
 
@@ -175,8 +207,9 @@ function parseFields(v: unknown): Record<string, string> | undefined {
 
 function errorMessage(data: Record<string, unknown>, status: number, fallback: string): string {
   if (typeof data.error === "string" && data.error) return data.error;
-  if (status === 504) return "The scan took too long and timed out. Try again, or submit a smaller archive.";
+  if (status === 504) return "The scan took too long and timed out. Try again, or submit a smaller archive (leave out data files, model weights and vendored libraries).";
   if (status === 413) return "The file is too large for this environment.";
+  if (status >= 500) return `${fallback}: the server had a temporary problem (HTTP ${status}). Your answers are kept; please try again.`;
   return `${fallback} (HTTP ${status}).`;
 }
 
@@ -187,7 +220,7 @@ async function requestUploadTarget(file: File): Promise<UploadInfo> {
     body: JSON.stringify({ fileName: file.name, size: file.size }),
   });
   const d = await readBody(res);
-  if (!res.ok) throw new ApiError(errorMessage(d, res.status, "The upload could not be prepared"));
+  if (!res.ok) throw new ApiError(errorMessage(d, res.status, "The upload could not be prepared"), undefined, res.status);
   if (d.mode === "inline" && typeof d.maxBytes === "number") return { mode: "inline", maxBytes: d.maxBytes };
   if (
     d.mode === "storage" &&
@@ -209,23 +242,34 @@ const GIT_REF = /^[A-Za-z0-9._\/-]{1,200}$/;
 const GIT_EXAMPLE = "for example https://github.com/owner/repository or https://gitlab.com/group/project";
 
 interface RepoInput {
-  /** Normalised repository URL (or the trimmed input when it cannot be parsed). */
+  /**
+   * Normalised repository URL (or the trimmed input when it cannot be parsed). Links to a branch, tag, commit or file
+   * (/tree/, /blob/, /commit/, /releases/tag/) are kept whole when no ref was typed: the server works out which part is the ref.
+   */
   url: string;
-  /** Ref from the input field, or taken from a /tree/<ref> link. */
+  /** Ref from the input field. */
   ref: string;
   urlError: string | null;
   refError: string | null;
 }
 
+/** Same normalisation as the server: "github.com/o/r" and "git@github.com:o/r.git" become https links. */
+function normaliseRepoInput(raw: string): string {
+  const ssh = /^git@(github\.com|gitlab\.com):(.+)$/i.exec(raw);
+  if (ssh) return `https://${ssh[1]}/${ssh[2]}`;
+  if (/^(www\.)?(github\.com|gitlab\.com)\//i.test(raw)) return `https://${raw}`;
+  return raw;
+}
+
 /** Client-side mirror of the server's parser: public github.com / gitlab.com over https only. */
 function parseRepoInput(rawUrl: string, rawRef: string): RepoInput {
   const input = rawUrl.trim();
-  let ref = rawRef.trim();
+  const ref = rawRef.trim();
   const fail = (urlError: string): RepoInput => ({ url: input, ref, urlError, refError: null });
   if (!input) return fail("Enter the link to a public GitHub or GitLab repository.");
   let u: URL;
   try {
-    u = new URL(input);
+    u = new URL(normaliseRepoInput(input));
   } catch {
     return fail(`Enter a complete link, ${GIT_EXAMPLE}.`);
   }
@@ -237,15 +281,16 @@ function parseRepoInput(rawUrl: string, rawRef: string): RepoInput {
     if (parts.length < 2) return fail(`Use the repository's own link, ${GIT_EXAMPLE}.`);
     const owner = parts[0];
     const repo = parts[1].replace(/\.git$/i, "");
-    if (!ref && parts[2] === "tree" && parts.length > 3) ref = parts.slice(3).join("/");
     if (!GIT_SEGMENT.test(owner) || !GIT_SEGMENT.test(repo)) return fail("The repository link contains unsupported characters.");
     url = `https://github.com/${owner}/${repo}`;
+    // /tree/feature/x/src can be branch "feature/x" with folder "src": leave splitting it to the server.
+    if (!ref && parts.length > 2) url = `https://github.com/${parts.join("/")}`;
   } else if (host === "gitlab.com") {
     const dash = parts.indexOf("-");
     const segs = (dash >= 0 ? parts.slice(0, dash) : parts).map((s, i, all) => (i === all.length - 1 ? s.replace(/\.git$/i, "") : s));
-    if (!ref && dash >= 0 && parts[dash + 1] === "tree" && parts.length > dash + 2) ref = parts.slice(dash + 2).join("/");
     if (segs.length < 2 || !segs.every((s) => GIT_SEGMENT.test(s))) return fail(`Use the project's own link, ${GIT_EXAMPLE}.`);
     url = `https://gitlab.com/${segs.join("/")}`;
+    if (!ref && dash >= 0 && parts.length > dash + 1) url = `https://gitlab.com/${parts.join("/")}`;
   } else {
     return fail("Only public repositories on github.com or gitlab.com are supported.");
   }
@@ -357,6 +402,12 @@ export default function SubmitWizard() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const probeSeq = useRef(0);
   const submittedName = useRef("");
+  const submitting = useRef(false);
+  const idempotencyKey = useRef<string | null>(null);
+  // Changed answers make it a different submission, not a retry of the previous one.
+  useEffect(() => {
+    idempotencyKey.current = null;
+  }, [answers]);
 
   /* draft persistence --------------------------------------------- */
   useEffect(() => {
@@ -488,6 +539,7 @@ export default function SubmitWizard() {
   /* navigation ------------------------------------------------------- */
   function goTo(i: number) {
     setStep(i);
+    setRestored(false);
     setFocusTarget({ kind: "heading" });
   }
 
@@ -603,22 +655,21 @@ export default function SubmitWizard() {
 
   function onGitUrlChange(v: string) {
     setGitUrl(v);
+    idempotencyKey.current = null;
     if (gitError) setGitError(null);
   }
 
   function onGitRefChange(v: string) {
     setGitRef(v);
+    idempotencyKey.current = null;
     if (gitRefError) setGitRefError(null);
   }
 
-  /** On blur: normalise the link (e.g. a /tree/<branch> link fills the ref field) and show errors early. */
+  /** On blur: normalise the link (e.g. add https://) and show errors early. */
   function onGitUrlBlur() {
     if (!gitUrl.trim()) return;
     const r = parseRepoInput(gitUrl, gitRef);
-    if (!r.urlError) {
-      if (r.url !== gitUrl) setGitUrl(r.url);
-      if (r.ref !== gitRef.trim()) setGitRef(r.ref);
-    }
+    if (!r.urlError && r.url !== gitUrl) setGitUrl(r.url);
     setGitError(r.urlError);
   }
 
@@ -631,13 +682,15 @@ export default function SubmitWizard() {
       if (seq === probeSeq.current) setProbe({ status: "ok", info });
     } catch (e) {
       if (seq !== probeSeq.current) return;
-      // Only server-side rejections block the submit; network hiccups are retried on submit.
-      setProbe(e instanceof ApiError ? { status: "error", message: e.message } : { status: "idle" });
+      // Only definitive rejections (4xx, e.g. file too large) block the submit; network hiccups and server errors are retried on submit.
+      const definitive = e instanceof ApiError && e.status >= 400 && e.status < 500;
+      setProbe(definitive ? { status: "error", message: e.message } : { status: "idle" });
     }
   }
 
   function selectFile(f: File | null) {
     probeSeq.current++;
+    idempotencyKey.current = null;
     setFile(f);
     setFileError(null);
     setProbe({ status: "idle" });
@@ -649,6 +702,11 @@ export default function SubmitWizard() {
     }
     if (f.size > MAX_UPLOAD_BYTES) {
       setFileError(`The file is ${formatBytes(f.size)}. The maximum upload size is ${formatBytes(MAX_UPLOAD_BYTES)}.`);
+      return;
+    }
+    const unsupported = unsupportedFileReason(f, kind);
+    if (unsupported) {
+      setFileError(unsupported);
       return;
     }
     void probeUpload(f);
@@ -680,6 +738,8 @@ export default function SubmitWizard() {
 
   /* submit ----------------------------------------------------------- */
   async function submit() {
+    // A second click (or Enter) while a submission is underway must not start a second scan.
+    if (submitting.current) return;
     setSubmitError(null);
     const allErrors = validateAnswers(answers);
     if (Object.keys(allErrors).length) {
@@ -691,16 +751,24 @@ export default function SubmitWizard() {
     if (source === "file") {
       if (!file) {
         setFileError("Select a file to scan.");
+        setFocusTarget({ kind: "input", id: "file-input" });
         return;
       }
-      if (fileError || probe.status === "error") return;
+      // The kind may have changed after the file was picked (e.g. a .py file, then switching to "Agent skill").
+      const unsupported = unsupportedFileReason(file, kind);
+      if (unsupported) {
+        setFileError(unsupported);
+        setFocusTarget({ kind: "input", id: "file-input" });
+        return;
+      }
+      if (fileError || probe.status === "error") {
+        setFocusTarget({ kind: "input", id: "file-input" });
+        return;
+      }
       target = { mode: "file", file };
     } else {
       const r = parseRepoInput(gitUrl, gitRef);
-      if (!r.urlError) {
-        if (r.url !== gitUrl) setGitUrl(r.url);
-        if (r.ref !== gitRef) setGitRef(r.ref);
-      }
+      if (!r.urlError && r.url !== gitUrl) setGitUrl(r.url);
       setGitError(r.urlError);
       setGitRefError(r.refError);
       if (r.urlError || r.refError) {
@@ -712,9 +780,16 @@ export default function SubmitWizard() {
 
     if (!confirmed) {
       setConfirmError(true);
+      setFocusTarget({ kind: "input", id: "confirm-check" });
       return;
     }
 
+    submitting.current = true;
+    // Reused when the user retries after a network error or time-out, so the server returns the submission it
+    // may already have created instead of scanning twice. Reset when the file, link or answers change.
+    const key = idempotencyKey.current ?? newIdempotencyKey();
+    idempotencyKey.current = key;
+    const jsonHeaders = { "content-type": "application/json", "idempotency-key": key };
     const clean = visibleAnswers(answers);
     submittedName.current = String(clean.asset_name ?? "asset");
     setRun(
@@ -732,7 +807,7 @@ export default function SubmitWizard() {
         setPhase("scanning");
         res = await fetch("/api/submissions", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: jsonHeaders,
           body: JSON.stringify({ answers: clean, source: { type: "git", url: target.url, ...(target.ref ? { ref: target.ref } : {}) } }),
         });
       } else {
@@ -751,7 +826,7 @@ export default function SubmitWizard() {
           setPhase("scanning");
           res = await fetch("/api/submissions", {
             method: "POST",
-            headers: { "content-type": "application/json" },
+            headers: jsonHeaders,
             body: JSON.stringify({ answers: clean, upload: { path: upload.path, fileName: f.name, size: f.size } }),
           });
         } else {
@@ -762,23 +837,30 @@ export default function SubmitWizard() {
           form.append("answers", JSON.stringify(clean));
           form.append("file", f, f.name);
           setPhase("scanning");
-          res = await fetch("/api/submissions", { method: "POST", body: form });
+          res = await fetch("/api/submissions", { method: "POST", headers: { "idempotency-key": key }, body: form });
         }
       }
 
       const data = await readBody(res);
-      if (!res.ok) throw new ApiError(errorMessage(data, res.status, "The submission failed"), parseFields(data.fields));
+      if (!res.ok) throw new ApiError(errorMessage(data, res.status, "The submission failed"), parseFields(data.fields), res.status);
       const id = typeof data.id === "string" ? data.id : "";
       if (!id) throw new ApiError("The server returned an unexpected response.");
 
       setPhase("redirecting");
-      try {
-        window.localStorage.removeItem(DRAFT_KEY);
-      } catch {
-        /* ignore */
+      // A scan that could not complete still creates a submission (decision null). Keep the draft then, so the
+      // "submit again" link on the report brings the answers back instead of an empty form.
+      if (typeof data.decision === "string") {
+        try {
+          window.localStorage.removeItem(DRAFT_KEY);
+        } catch {
+          /* ignore */
+        }
       }
       router.push(`/reports/${encodeURIComponent(id)}`);
     } catch (e) {
+      submitting.current = false;
+      // A definitive rejection (4xx) created nothing on the server; the next attempt is a new submission.
+      if (e instanceof ApiError && e.status >= 400 && e.status < 500) idempotencyKey.current = null;
       setPhase("idle");
       const message = e instanceof ApiError ? e.message : "The server could not be reached. Check your connection and try again.";
       setSubmitError(message);
@@ -837,8 +919,9 @@ export default function SubmitWizard() {
   const section = currentStep < uploadStep ? sections[currentStep] : null;
   const heading = section ? (kind === "skill" && section.id === "asset" ? SKILL_HEADING : (STEP_HEADINGS[section.id] ?? section.title)) : UPLOAD_COPY[kind].heading;
   const intro = section ? (kind === "skill" && section.id === "asset" ? SKILL_INTRO : section.intro) : UPLOAD_COPY[kind].intro;
-  const submitDisabled =
-    source === "file" ? !file || !!fileError || probe.status === "error" || probe.status === "checking" : !gitUrl.trim() || !!gitError || !!gitRefError;
+  // Only disabled while the file is being checked. Otherwise a click explains what is missing (no file, invalid link, …)
+  // instead of leaving a silently disabled button.
+  const submitDisabled = source === "file" && !!file && probe.status === "checking";
 
   return (
     <div className="mx-auto max-w-[1136px]">
@@ -895,13 +978,16 @@ export default function SubmitWizard() {
           <p className="mx-auto mt-3 max-w-[620px] text-base leading-7 text-muted sm:text-[17px]">{intro}</p>
         </div>
 
-        {restored && currentStep === 0 && (
+        {restored && (
           <p
-            className="mx-auto mt-6 flex w-fit items-center gap-2 rounded-full border border-line bg-white px-3.5 py-1.5 text-[13px] text-muted shadow-xs"
+            className="mx-auto mt-6 flex w-fit max-w-full items-center gap-2 rounded-xl border border-line bg-white px-3.5 py-1.5 text-[13px] text-muted shadow-xs"
             role="status"
           >
-            <span className="size-1.5 rounded-full bg-brand" aria-hidden="true" />
-            Your draft was restored from this browser.
+            <span className="size-1.5 shrink-0 rounded-full bg-brand" aria-hidden="true" />
+            <span>
+              Your draft was restored from this browser.
+              {!section && source === "file" && !file ? " Files are not saved, so select your file again." : ""}
+            </span>
           </p>
         )}
 
@@ -1223,7 +1309,7 @@ function StepProgress({
                   onClick={() => onSelect(i)}
                   aria-current={current ? "step" : undefined}
                   aria-label={`Step ${i + 1}: ${title}${state !== "upload" ? ` (${STATE_TEXT[state]})` : ""}`}
-                  className="group flex w-full flex-col gap-2 rounded-md py-1.5 text-left"
+                  className="group flex w-full flex-col gap-2 rounded-md py-2.5 text-left sm:py-1.5"
                 >
                   <span className={`h-1 w-full rounded-full transition-colors ${bar}`} />
                   <span className={`hidden text-xs leading-4 transition-colors group-hover:text-ink sm:block ${label}`}>{short[i]}</span>
@@ -1748,7 +1834,7 @@ function UploadStep(props: {
                   ref={fileInputRef}
                   id="file-input"
                   type="file"
-                  accept={ACCEPT}
+                  accept={kind === "skill" ? ".zip,.md" : ACCEPT}
                   className="sr-only"
                   aria-describedby={rowError ? "file-error" : "file-hint"}
                   onChange={(e) => {
@@ -1879,6 +1965,7 @@ function UploadStep(props: {
       <div className={`rounded-xl border bg-white px-4 py-4 shadow-xs sm:px-5 ${props.confirmError ? "border-[#FDA29B]" : "border-line"}`}>
         <label className="flex cursor-pointer items-start gap-3 text-[15px] leading-6 text-ink-2">
           <input
+            id="confirm-check"
             type="checkbox"
             checked={props.confirmed}
             onChange={(e) => props.onConfirm(e.target.checked)}
@@ -1889,7 +1976,7 @@ function UploadStep(props: {
           <span>I confirm the information is accurate and I am authorised to submit this {kind === "skill" ? "skill" : "asset"}.</span>
         </label>
         {props.confirmError && (
-          <p id="confirm-error" className="mt-2 flex items-center gap-1.5 pl-[30px] text-[13px] font-medium text-sev-critical">
+          <p id="confirm-error" role="alert" className="mt-2 flex items-center gap-1.5 pl-[30px] text-[13px] font-medium text-sev-critical">
             Confirm the statement above to continue.
           </p>
         )}
@@ -1960,7 +2047,13 @@ function ScanProgress({
           {done ? "Your report is ready" : kind === "skill" ? "Reviewing your skill" : "Scanning your application"}
         </h1>
         <p className="mx-auto mt-3 max-w-[560px] text-base leading-7 text-muted sm:text-[17px]">
-          {done ? "Opening the report…" : "This usually takes 5 to 40 seconds. Keep this tab open; the report opens automatically."}
+          {done
+            ? "Opening the report…"
+            : phase === "uploading"
+              ? "Uploading your file. This depends on your connection speed; the scan starts as soon as the upload is complete."
+              : secs >= 45
+                ? "Still working. Large projects and slow dependency look-ups can take up to a minute. Keep this tab open; the report opens automatically."
+                : "This usually takes 5 to 40 seconds. Keep this tab open; the report opens automatically."}
         </p>
       </div>
 

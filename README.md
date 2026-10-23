@@ -7,8 +7,8 @@ Teams submit their application (zip) and complete an intake questionnaire. The g
 | Decision | Meaning |
 | --- | --- |
 | **Approved for catalogue** | All gates pass. A reviewer signs off and publishes. |
-| **Manual review required** | No blocking issues, but high findings, an EU AI Act high-risk use case or a trust score below 75. |
-| **Blocked** | Exposed secrets, unsafe model files, critical findings or a prohibited AI practice. |
+| **Manual review required** | No blocking issues, but high findings, an EU AI Act high-risk use case, a trust score below 75, an incomplete scan (a scanner failed or timed out, files were skipped) or serious findings waived via `.aigateignore`. |
+| **Blocked** | Exposed secrets, unsafe model files, critical findings, a prohibited AI practice, or an upload with nothing scannable. |
 
 ## What is checked
 
@@ -42,7 +42,9 @@ Outputs: an interactive report, a JSON report and a CycloneDX 1.5 SBOM. Reviewer
 
 ## Setup
 
-1. Create a Supabase project (EU region) and run [`supabase/migrations/0001_init.sql`](supabase/migrations/0001_init.sql) in the SQL editor.
+1. Create a Supabase project (EU region) and run the migrations in order in the SQL editor:
+   - [`supabase/migrations/0001_init.sql`](supabase/migrations/0001_init.sql)
+   - [`supabase/migrations/0002_hardening.sql`](supabase/migrations/0002_hardening.sql): append-only audit trail, idempotency key, database checks on review status. If its unique index on `file_path` fails, an old upload was submitted twice; delete the duplicate row first.
 2. Set the environment variables from [`.env.example`](.env.example) in Vercel (Project → Settings → Environment Variables):
    - `SUPABASE_URL`
    - `SUPABASE_PUBLISHABLE_KEY`, used only to upload files to a one-time signed URL

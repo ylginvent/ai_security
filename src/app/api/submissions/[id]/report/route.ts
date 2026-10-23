@@ -1,5 +1,5 @@
 import { DECISION_LABEL } from "@/lib/scoring";
-import { handle, HttpError, json } from "@/lib/server/http";
+import { downloadName, handle, HttpError, json } from "@/lib/server/http";
 import { getStore } from "@/lib/store";
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -29,7 +29,6 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       questionnaire: s.answers,
       report: s.report,
     };
-    const name = `${s.asset_name.replace(/[^A-Za-z0-9._-]+/g, "-").toLowerCase()}-report.json`;
-    return json(doc, 200, { "content-disposition": `attachment; filename="${name}"` });
+    return json(doc, 200, { "content-disposition": `attachment; filename="${downloadName(s.asset_name, "report.json")}"` });
   });
 }

@@ -9,7 +9,10 @@ import { errorMessage, snippetOf, splitLines, type Archive, type RawFinding, typ
 type Ecosystem = PackageRef["ecosystem"];
 
 const OSV = "https://api.osv.dev/v1";
+/** OSV staat max. 1000 queries per querybatch toe. */
 const BATCH_SIZE = 500;
+/** Max. aantal vervolgpagina's (next_page_token) per batch. */
+const MAX_PAGES = 5;
 const MAX_DETAILS = 200;
 const CONCURRENCY = 16;
 const BATCH_TIMEOUT = 15000;
@@ -46,7 +49,9 @@ function parsePackageLock(f: SourceFile, c: Collector) {
     for (const [key, entry] of Object.entries(lock.packages)) {
       if (key === "" || !isRecord(entry) || entry.link === true) continue;
       const i = key.lastIndexOf("node_modules/");
-      const name = str(entry.name) ?? (i >= 0 ? key.slice(i + "node_modules/".length) : key);
+      // Sleutels zonder node_modules/ zijn workspace-pakketten van het project zelf, niet uit de registry
+      if (i < 0) continue;
+      const name = str(entry.name) ?? key.slice(i + "node_modules/".length);
       const version = str(entry.version);
       if (version && EXACT.test(version)) c.add("npm", name, version, f.path);
     }
@@ -67,8 +72,11 @@ function parsePackageLock(f: SourceFile, c: Collector) {
 /** Minimale versie uit een npm-range halen (^1.2.3 → 1.2.3). */
 function rangeFloor(range: string): string | undefined {
   const r = range.trim();
-  if (!r || /^(?:workspace:|file:|link:|git|https?:|github:|npm:|portal:|\*|latest|next|x$)/i.test(r)) return undefined;
-  const first = r.split("||")[0].trim().replace(/^[\^~>=<v\s]+/, "").split(/\s+/)[0];
+  if (!r || /^(?:workspace:|file:|link:|git|https?:|github:|npm:|portal:|catalog:|\*|latest|next|x$)/i.test(r)) return undefined;
+  const alt = r.split("||")[0].trim();
+  // "<2.0.0" / "<=1.4" hebben geen ondergrens: de bovengrens is géén bruikbare versie om op te vragen
+  if (alt.startsWith("<")) return undefined;
+  const first = alt.replace(/^[\^~>=v\s]+/, "").split(/\s+/)[0];
   const m = /^(\d+)(?:\.(\d+|x|\*))?(?:\.(\d+|x|\*))?(-[0-9A-Za-z.-]+)?$/.exec(first);
   if (!m) return undefined;
   const num = (s: string | undefined) => (s === undefined || s === "x" || s === "*" ? "0" : s);
@@ -88,6 +96,21 @@ function parsePackageJson(f: SourceFile, c: Collector) {
   }
 }
 
+/**
+ * Pakketnaam uit een yarn-descriptor ("@scope/pkg@^1.0.0", Berry: "pkg@npm:^1.0.0", alias "x@npm:real@^1").
+ * Workspace-, patch-, link- en git-descriptors leveren geen registry-pakket op.
+ */
+function yarnName(descriptor: string): string | undefined {
+  const s = descriptor.trim().replace(/^"|"$/g, "");
+  const at = s.indexOf("@", 1);
+  if (at <= 0) return undefined;
+  const name = s.slice(0, at);
+  const range = s.slice(at + 1);
+  if (/^(?:workspace|patch|link|portal|file|git|git\+\w+|github|https?|exec):/i.test(range)) return undefined;
+  const alias = /^npm:((?:@[^/@\s]+\/)?[^@\s]+)@/.exec(range);
+  return alias ? alias[1] : name;
+}
+
 function parseYarnLock(f: SourceFile, c: Collector) {
   let names: string[] = [];
   for (const line of splitLines(f.text ?? "")) {
@@ -95,17 +118,13 @@ function parseYarnLock(f: SourceFile, c: Collector) {
       names = line
         .replace(/:\s*$/, "")
         .split(",")
-        .map((s) => s.trim().replace(/^"|"$/g, ""))
-        .map((s) => {
-          const at = s.lastIndexOf("@");
-          return at > 0 ? s.slice(0, at) : s;
-        })
-        .filter((s) => s && !s.includes(" "));
+        .map(yarnName)
+        .filter((s): s is string => s !== undefined && s !== "" && !s.includes(" "));
       continue;
     }
     const m = /^\s+version:?\s+"?([^"\s]+)"?\s*$/.exec(line);
     if (m && names.length) {
-      for (const n of Array.from(new Set(names))) if (EXACT.test(m[1])) c.add("npm", n.replace(/@npm$/, ""), m[1], f.path);
+      for (const n of Array.from(new Set(names))) if (EXACT.test(m[1])) c.add("npm", n, m[1], f.path);
       names = [];
     }
   }
@@ -114,10 +133,18 @@ function parseYarnLock(f: SourceFile, c: Collector) {
 function parsePnpmLock(f: SourceFile, c: Collector) {
   let inPackages = false;
   for (const line of splitLines(f.text ?? "")) {
-    if (/^\S/.test(line)) inPackages = /^packages:\s*$/.test(line);
+    if (/^\S/.test(line)) inPackages = /^(?:packages|snapshots):\s*$/.test(line);
     if (!inPackages) continue;
-    const m = /^ {2}['"]?\/?((?:@[^/\s'"]+\/)?[^@/\s'"(]+)[@/](\d[^:'"\s(]*)/.exec(line);
+    // v5: /name/1.2.3_peer@x, v6: /name@1.2.3(peer@x), v9: 'name@1.2.3'
+    const m = /^ {2}['"]?\/?((?:@[^/\s'"]+\/)?[^@/\s'"(]+)[@/](\d[^:'"\s(_]*)/.exec(line);
     if (m && EXACT.test(m[2])) c.add("npm", m[1], m[2], f.path);
+  }
+}
+
+/** bun.lock (tekst, JSONC): "pkg": ["pkg@1.2.3", "", {...}, "sha512-…"]. */
+function parseBunLock(f: SourceFile, c: Collector) {
+  for (const m of (f.text ?? "").matchAll(/^\s*"[^"]+":\s*\[\s*"((?:@[^@"/\s]+\/)?[^@"\s]+)@([^"\s]+)"/gm)) {
+    if (EXACT.test(m[2])) c.add("npm", m[1], m[2], f.path);
   }
 }
 
@@ -150,25 +177,38 @@ function parsePipfileLock(f: SourceFile, c: Collector) {
 
 /** [[package]]-blokken van poetry.lock / Cargo.lock / uv.lock. */
 function parseTomlPackages(f: SourceFile, c: Collector, ecosystem: Ecosystem) {
-  let cur: { name?: string; version?: string; source?: string } | null = null;
+  let cur: { name?: string; version?: string; source?: string; local?: boolean } | null = null;
   const flush = () => {
-    if (!cur || !cur.name || !cur.version) return;
+    if (!cur || !cur.name || !cur.version || cur.local) return;
     if (ecosystem === "crates.io" && !(cur.source ?? "").startsWith("registry+")) return; // lokale crates
     c.add(ecosystem, ecosystem === "PyPI" ? normalisePyName(cur.name) : cur.name, cur.version, f.path);
   };
-  let inHeader = false;
+  // 0 = buiten een pakket, 1 = in [[package]], 2 = in [package.source] (poetry)
+  let section = 0;
   for (const line of splitLines(f.text ?? "")) {
     if (/^\[\[package\]\]\s*$/.test(line)) {
       flush();
       cur = {};
-      inHeader = true;
+      section = 1;
+      continue;
+    }
+    if (/^\[package\.source\]\s*$/.test(line)) {
+      section = cur ? 2 : 0;
       continue;
     }
     if (/^\[/.test(line)) {
-      inHeader = false;
+      section = 0;
       continue;
     }
-    if (!inHeader || !cur) continue;
+    if (!section || !cur) continue;
+    if (section === 2) {
+      // poetry: lokale mappen/bestanden zijn het eigen project, geen PyPI-pakket
+      const t = /^type\s*=\s*"([^"]*)"/.exec(line);
+      if (t && /^(?:directory|file)$/.test(t[1])) cur.local = true;
+      continue;
+    }
+    // uv.lock: source = { editable = "." } / { virtual = "." } / { path = "…" } is het eigen project
+    if (/^source\s*=\s*\{[^}]*\b(?:editable|virtual|path|directory)\s*=/.test(line)) cur.local = true;
     const m = /^(name|version|source)\s*=\s*"([^"]*)"/.exec(line);
     if (m) {
       if (m[1] === "name") cur.name = m[2];
@@ -230,11 +270,49 @@ function xmlTag(block: string, tag: string): string | undefined {
 }
 
 function parsePom(f: SourceFile, c: Collector) {
-  for (const m of (f.text ?? "").matchAll(/<dependency>([\s\S]*?)<\/dependency>/g)) {
+  const text = (f.text ?? "").replace(/<!--[\s\S]*?-->/g, "");
+  // ${spring.version}-achtige versies oplossen via <properties> in dezelfde pom
+  const props = new Map<string, string>();
+  for (const block of text.matchAll(/<properties>([\s\S]*?)<\/properties>/g)) {
+    for (const p of block[1].matchAll(/<([\w.-]+)>\s*([^<\s]+)\s*<\/\1>/g)) props.set(p[1], p[2]);
+  }
+  for (const m of text.matchAll(/<dependency>([\s\S]*?)<\/dependency>/g)) {
     const g = xmlTag(m[1], "groupId");
     const a = xmlTag(m[1], "artifactId");
-    const v = xmlTag(m[1], "version");
+    const raw = xmlTag(m[1], "version");
+    const v = raw?.replace(/^\$\{([^}]+)\}$/, (whole: string, key: string) => props.get(key) ?? whole);
     if (g && a && v && !v.includes("${") && /^\d/.test(v)) c.add("Maven", `${g}:${a}`, v, f.path);
+  }
+}
+
+/** gradle.lockfile: group:artifact:version=configurations. */
+function parseGradleLock(f: SourceFile, c: Collector) {
+  for (const line of splitLines(f.text ?? "")) {
+    const m = /^([\w.-]+):([\w.-]+):([^=\s]+)=/.exec(line.trim());
+    if (m && /^\d/.test(m[3])) c.add("Maven", `${m[1]}:${m[2]}`, m[3], f.path);
+  }
+}
+
+/** Letterlijke coördinaten in build.gradle(.kts): implementation("group:artifact:1.2.3"). */
+function parseGradleBuild(f: SourceFile, c: Collector) {
+  const re = /\b(?:implementation|api|compile|compileOnly|runtimeOnly|testImplementation|annotationProcessor|kapt|classpath)\s*\(?\s*["']([\w.-]+):([\w.-]+):([^"'\s:@]+)["']/g;
+  for (const m of (f.text ?? "").matchAll(re)) {
+    const v = m[3];
+    if (/^\d/.test(v) && !/[+$\[\]()]/.test(v)) c.add("Maven", `${m[1]}:${m[2]}`, v, f.path);
+  }
+}
+
+/** NuGet packages.lock.json: dependencies → framework → pakket → resolved. */
+function parseNugetLock(f: SourceFile, c: Collector) {
+  const lock = parseJson(f.text ?? "");
+  if (!isRecord(lock) || !isRecord(lock.dependencies)) return;
+  for (const framework of Object.values(lock.dependencies)) {
+    if (!isRecord(framework)) continue;
+    for (const [name, entry] of Object.entries(framework)) {
+      if (!isRecord(entry) || entry.type === "Project") continue;
+      const v = str(entry.resolved);
+      if (v && /^\d+(?:\.\d+)+[-.\w]*$/.test(v)) c.add("NuGet", name, v, f.path);
+    }
   }
 }
 
@@ -271,22 +349,60 @@ interface OsvVuln {
   database_specific?: { severity?: unknown; cwe_ids?: unknown };
 }
 interface OsvBatch {
-  results?: { vulns?: { id: string }[] }[];
+  results?: unknown[];
 }
 
-async function fetchJson<T>(url: string, init: RequestInit, ms: number): Promise<T> {
+class HttpError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+const TIME_LIMIT = "scan time limit reached";
+const STOPPED_EARLY = "The dependency check stopped early because the scan time limit was reached; results may be incomplete.";
+
+/** fetch met eigen timeout; `outer` (de scan-deadline) breekt lopende requests ook af. */
+async function fetchJson<T>(url: string, init: RequestInit, ms: number, outer?: AbortSignal): Promise<T> {
+  if (ms < 200 || outer?.aborted) throw new Error(TIME_LIMIT);
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), Math.max(1, ms));
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  const onAbort = () => ctrl.abort();
+  outer?.addEventListener("abort", onAbort);
   try {
     const res = await fetch(url, { ...init, signal: ctrl.signal, headers: { "content-type": "application/json", accept: "application/json" } });
-    if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}`);
+    if (!res.ok) throw new HttpError(res.status, `HTTP ${res.status} from ${new URL(url).host}`);
     return (await res.json()) as T;
   } catch (e) {
-    if (ctrl.signal.aborted) throw new Error(`timeout after ${ms} ms`);
+    if (outer?.aborted) throw new Error(TIME_LIMIT);
+    if (ctrl.signal.aborted) throw new Error(`no response within ${Math.round(ms / 1000)} s`);
     throw e;
   } finally {
     clearTimeout(timer);
+    outer?.removeEventListener("abort", onAbort);
   }
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** fetchJson met retries bij rate limiting (429), 5xx en netwerkfouten, binnen de deadline. */
+async function fetchJsonRetry<T>(url: string, init: RequestInit, timeout: number, deadline: number, outer?: AbortSignal, attempts = 3): Promise<T> {
+  let last: unknown = new Error(TIME_LIMIT);
+  for (let a = 0; a < attempts; a++) {
+    if (a > 0) {
+      const wait = Math.min(1000 * 2 ** (a - 1), deadline - Date.now() - 2000);
+      if (wait < 0 || outer?.aborted) break;
+      await sleep(wait);
+    }
+    try {
+      return await fetchJson<T>(url, init, Math.min(timeout, deadline - Date.now()), outer);
+    } catch (e) {
+      last = e;
+      if (e instanceof HttpError && e.status !== 429 && e.status < 500) break;
+    }
+  }
+  throw last instanceof Error ? last : new Error(String(last));
 }
 
 /* ------------------------------------------------------------- versies/CVSS */
@@ -459,33 +575,101 @@ export interface DependencyResult extends ScannerResult {
   packages: PackageRef[];
 }
 
-const LOCK_NPM = new Set(["package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb"]);
+/** npm-lockfiles die we kunnen parsen; bun.lockb is binair en telt alleen als "er is een lockfile". */
+const LOCK_NPM_PARSED = new Set(["package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock"]);
+const LOCK_NPM = new Set([...Array.from(LOCK_NPM_PARSED), "bun.lockb"]);
 const LOCK_PY = new Set(["poetry.lock", "uv.lock", "pdm.lock", "Pipfile.lock"]);
+const ALL_LOCKS = new Set([...Array.from(LOCK_NPM), ...Array.from(LOCK_PY), "Cargo.lock", "packages.lock.json", "gradle.lockfile"]);
 
-export async function scanDependencies(archive: Archive): Promise<DependencyResult> {
+/** Ecosysteem-specifieke upgrade-instructie die een niet-security-ontwikkelaar direct kan uitvoeren. */
+function upgradeAdvice(pkg: PackageRef, fixed: string): string {
+  const n = pkg.name;
+  switch (pkg.ecosystem) {
+    case "npm":
+      return `Upgrade ${n} to ${fixed} or later: run npm install ${n}@^${fixed} if it is a direct dependency. If it is pulled in by another package, upgrade that parent package, or force the version with "overrides" (npm) / "resolutions" (yarn) / "pnpm.overrides" in package.json. Then commit the updated lockfile.`;
+    case "PyPI":
+      return `Upgrade ${n} to ${fixed} or later: change the requirement to ${n}>=${fixed} (or ${n}==${fixed} when pinning) in requirements.txt / pyproject.toml, regenerate the lockfile (pip-compile, poetry lock or uv lock) and reinstall.`;
+    case "Maven": {
+      const artifact = n.split(":")[1] ?? n;
+      return `Upgrade ${n} to ${fixed} or later: set <version>${fixed}</version> for ${artifact} in pom.xml (or build.gradle). If it is a transitive dependency, pin the version in <dependencyManagement> (Gradle: a constraints block).`;
+    }
+    case "NuGet":
+      return `Upgrade ${n} to ${fixed} or later: run dotnet add package ${n} --version ${fixed} (or set Version="${fixed}" on the PackageReference / PackageVersion).`;
+    case "Go":
+      return `Upgrade ${n} to ${fixed} or later: run go get ${n}@v${fixed.replace(/^v/, "")} followed by go mod tidy.`;
+    default:
+      return `Upgrade ${n} to ${fixed} or later: run cargo update -p ${n} --precise ${fixed}, or raise the version requirement in Cargo.toml.`;
+  }
+}
+
+/**
+ * @param deadline optionele absolute deadline (epoch ms) van de hele scan. De effectieve deadline is
+ * het vroegste van deze waarde en het eigen budget; lopende requests worden dan afgebroken en het
+ * resultaat krijgt status "error" met een notitie dat de controle vroegtijdig stopte.
+ */
+export async function scanDependencies(archive: Archive, deadline?: number): Promise<DependencyResult> {
   const started = Date.now();
-  const deadline = started + BUDGET_MS;
+  const effective = Math.min(started + BUDGET_MS, deadline ?? Infinity);
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), Math.max(0, effective - started));
+  try {
+    return await runDependencyScan(archive, effective, abort.signal);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function runDependencyScan(archive: Archive, deadline: number, signal: AbortSignal): Promise<DependencyResult> {
   const packages: PackageRef[] = [];
-  const seen = new Set<string>();
+  const seen = new Map<string, PackageRef>();
   const collector: Collector = {
     add(ecosystem, name, version, source, approximate) {
       const key = `${ecosystem}|${name}|${version}`;
-      if (!name || seen.has(key)) return;
-      seen.add(key);
-      packages.push(approximate ? { ecosystem, name, version, approximate: true, source } : { ecosystem, name, version, source });
+      if (!name || !version) return;
+      const existing = seen.get(key);
+      if (existing) {
+        // Een exacte versie uit een lockfile wint van dezelfde versie afgeleid uit een range
+        if (existing.approximate && !approximate) {
+          delete existing.approximate;
+          existing.source = source;
+        }
+        return;
+      }
+      const ref: PackageRef = approximate ? { ecosystem, name, version, approximate: true, source } : { ecosystem, name, version, source };
+      seen.set(key, ref);
+      packages.push(ref);
     },
   };
 
   const findings: RawFinding[] = [];
+  const notes: string[] = [];
   const unpinned = new Map<string, string[]>();
-  const namesByDir = new Map<string, Set<string>>();
+  const present = new Map<string, Set<string>>();
+  const readable = new Map<string, Set<string>>();
   for (const f of archive.files) {
-    const set = namesByDir.get(f.dir) ?? new Set<string>();
-    set.add(f.name);
-    namesByDir.set(f.dir, set);
+    const all = present.get(f.dir) ?? new Set<string>();
+    all.add(f.name);
+    present.set(f.dir, all);
+    if (f.text === undefined) continue;
+    const ok = readable.get(f.dir) ?? new Set<string>();
+    ok.add(f.name);
+    readable.set(f.dir, ok);
   }
-  const has = (dir: string, names: Set<string>) => Array.from(namesByDir.get(dir) ?? []).some((n) => names.has(n));
+  const has = (dir: string, names: Set<string>, index: Map<string, Set<string>>) => Array.from(index.get(dir) ?? []).some((n) => names.has(n));
+  /** Lockfile in deze map of een bovenliggende map (workspaces/monorepos hebben één lockfile in de root). */
+  const hasUp = (dir: string, names: Set<string>, index: Map<string, Set<string>>) => {
+    for (let d = dir; ; d = d.includes("/") ? d.slice(0, d.lastIndexOf("/")) : "") {
+      if (has(d, names, index)) return true;
+      if (d === "") return false;
+    }
+  };
   const byPath = new Map(archive.files.map((f) => [f.path, f] as [string, SourceFile]));
+
+  // Lockfiles die wel bestaan maar niet gelezen konden worden (te groot, binair, corrupt): melden, niet stil negeren
+  const unreadLocks = archive.files.filter((f) => f.text === undefined && ALL_LOCKS.has(f.name)).map((f) => f.path);
+  if (unreadLocks.length) {
+    notes.push(`Lockfile(s) could not be read and were not used: ${unreadLocks.slice(0, 5).join(", ")}${unreadLocks.length > 5 ? " …" : ""}${unreadLocks.some((p) => p.endsWith("bun.lockb")) ? " (bun.lockb is a binary format; run bun install --save-text-lockfile to create bun.lock)" : ""}. Versions for those projects were inferred from the manifest where possible.`);
+  }
 
   for (const f of archive.files) {
     if (f.text === undefined) continue;
@@ -494,23 +678,29 @@ export async function scanDependencies(archive: Archive): Promise<DependencyResu
     if (n === "package-lock.json" || n === "npm-shrinkwrap.json") parsePackageLock(f, collector);
     else if (n === "yarn.lock") parseYarnLock(f, collector);
     else if (n === "pnpm-lock.yaml") parsePnpmLock(f, collector);
+    else if (n === "bun.lock") parseBunLock(f, collector);
     else if (n === "package.json") {
-      if (has(f.dir, LOCK_NPM)) continue;
+      if (hasUp(f.dir, LOCK_NPM_PARSED, readable)) continue;
       const before = packages.length;
       parsePackageJson(f, collector);
-      if (packages.length > before || /"(?:dev)?[dD]ependencies"\s*:\s*\{\s*"/.test(f.text)) findings.push(noLockfile(f, "npm", "package-lock.json (npm ci)"));
+      const declares = packages.length > before || /"(?:dev)?[dD]ependencies"\s*:\s*\{\s*"/.test(f.text);
+      if (declares && !hasUp(f.dir, LOCK_NPM, present)) findings.push(noLockfile(f, "npm", "package-lock.json (npm ci)"));
     } else if (/^requirements[^/]*\.txt$/i.test(n) || (/\.txt$/i.test(n) && /(?:^|\/)requirements$/i.test(f.dir))) parseRequirements(f, collector, unpinned);
     else if (n === "Pipfile.lock") parsePipfileLock(f, collector);
     else if (n === "poetry.lock" || n === "uv.lock" || n === "pdm.lock") parseTomlPackages(f, collector, "PyPI");
     else if (n === "pyproject.toml") {
       const declares = /^\s*dependencies\s*=\s*\[\s*["']|^\[tool\.poetry\.dependencies\]/m.test(f.text);
-      if (has(f.dir, LOCK_PY)) continue;
+      if (hasUp(f.dir, LOCK_PY, readable)) continue;
       parsePyproject(f, collector);
-      const hasPinnedRequirements = Array.from(namesByDir.get(f.dir) ?? []).some((x) => /^requirements[^/]*\.txt$/i.test(x));
-      if (declares && !hasPinnedRequirements) findings.push(noLockfile(f, "PyPI", "poetry.lock / uv.lock"));
+      const hasRequirements = Array.from(present.get(f.dir) ?? []).some((x) => /^requirements[^/]*\.txt$/i.test(x));
+      if (declares && !hasRequirements && !hasUp(f.dir, LOCK_PY, present)) findings.push(noLockfile(f, "PyPI", "poetry.lock / uv.lock"));
     } else if (n === "go.mod") parseGoMod(f, collector);
     else if (n === "pom.xml") parsePom(f, collector);
-    else if (lower.endsWith(".csproj") || lower.endsWith(".fsproj") || n === "packages.config" || n === "Directory.Packages.props") parseNuget(f, collector);
+    else if (n === "gradle.lockfile") parseGradleLock(f, collector);
+    else if (n === "build.gradle" || n === "build.gradle.kts") {
+      if (!has(f.dir, new Set(["gradle.lockfile"]), readable)) parseGradleBuild(f, collector);
+    } else if (n === "packages.lock.json") parseNugetLock(f, collector);
+    else if (lower.endsWith(".csproj") || lower.endsWith(".fsproj") || lower.endsWith(".vbproj") || n === "packages.config" || n === "Directory.Packages.props") parseNuget(f, collector);
     else if (n === "Cargo.lock") parseTomlPackages(f, collector, "crates.io");
   }
 
@@ -529,52 +719,99 @@ export async function scanDependencies(archive: Archive): Promise<DependencyResu
   });
 
   if (!packages.length) {
-    return { findings, packages, status: "skipped", note: "No supported dependency manifests or lockfiles found." };
+    const note = unpinned.size
+      ? "Python dependencies were found, but none had an exact version (==), so known vulnerabilities could not be looked up."
+      : "No supported dependency manifests or lockfiles found.";
+    return { findings, packages, status: "skipped", note: [...notes, note].join(" ") };
   }
 
   // deps.dev (licenties, deprecation) loopt parallel aan OSV; fouten worden stil genegeerd
-  const depsDevPromise = queryDepsDev(packages);
-  const withDepsDev = async (notes: string[]): Promise<string | undefined> => {
+  const depsDevPromise = queryDepsDev(packages, deadline, signal);
+  const withDepsDev = async (): Promise<string | undefined> => {
     const dd = await depsDevPromise;
     findings.push(...depsDevFindings(dd));
     notes.push(depsDevNote(dd, packages.length));
     return notes.length ? notes.join(" ") : undefined;
   };
 
-  /* --- OSV querybatch --- */
+  /* --- OSV querybatch (met paginering via next_page_token) --- */
   const vulnIdsPerPkg: string[][] = packages.map(() => []);
-  let failedChunks = 0;
+  /** Packages waarvoor OSV geen (volledig) antwoord gaf: "niet gecontroleerd", nooit "geen kwetsbaarheden". */
+  const unchecked = new Set<number>();
   let lastError = "";
-  const chunks: number[] = [];
-  for (let i = 0; i < packages.length; i += BATCH_SIZE) chunks.push(i);
-  await Promise.all(
-    chunks.map(async (start) => {
-      const slice = packages.slice(start, start + BATCH_SIZE);
-      try {
-        const body = JSON.stringify({ queries: slice.map((p) => ({ package: { name: p.name, ecosystem: p.ecosystem }, version: p.version })) });
-        const res = await fetchJson<OsvBatch>(`${OSV}/querybatch`, { method: "POST", body }, Math.min(BATCH_TIMEOUT, deadline - Date.now()));
-        (res.results ?? []).forEach((r, j) => {
-          const ids = (r?.vulns ?? []).map((v) => v.id).filter((id): id is string => typeof id === "string");
-          if (start + j < vulnIdsPerPkg.length) vulnIdsPerPkg[start + j] = ids;
-        });
-      } catch (e) {
-        failedChunks++;
-        lastError = errorMessage(e);
+  const queryChunk = async (indices: number[], firstPage: { idx: number; token?: string }[] = []): Promise<void> => {
+    let pending: { idx: number; token?: string }[] = firstPage.length ? firstPage : indices.map((idx) => ({ idx }));
+    for (let page = 0; pending.length; page++) {
+      if (page >= MAX_PAGES) {
+        for (const { idx } of pending) unchecked.add(idx);
+        lastError = lastError || "too many result pages";
+        return;
       }
-    }),
-  );
+      const body = JSON.stringify({
+        queries: pending.map(({ idx, token }) => {
+          const p = packages[idx];
+          const q = { package: { name: p.name, ecosystem: p.ecosystem }, version: p.version };
+          return token ? { ...q, page_token: token } : q;
+        }),
+      });
+      let res: OsvBatch;
+      try {
+        res = await fetchJsonRetry<OsvBatch>(`${OSV}/querybatch`, { method: "POST", body }, BATCH_TIMEOUT, deadline, signal);
+      } catch (e) {
+        // Eén ongeldige query (rare naam/versie) laat OSV de hele batch weigeren: splitsen en apart opnieuw proberen
+        if (e instanceof HttpError && e.status === 400 && pending.length > 1) {
+          const half = Math.ceil(pending.length / 2);
+          const parts = [pending.slice(0, half), pending.slice(half)];
+          await Promise.all(parts.map((part) => queryChunk([], part)));
+          return;
+        }
+        lastError = errorMessage(e);
+        for (const { idx } of pending) unchecked.add(idx);
+        return;
+      }
+      const results = Array.isArray(res?.results) ? res.results : [];
+      const next: { idx: number; token?: string }[] = [];
+      pending.forEach(({ idx }, j) => {
+        if (j >= results.length) {
+          unchecked.add(idx);
+          return;
+        }
+        const r = results[j];
+        if (!isRecord(r)) return;
+        if (Array.isArray(r.vulns)) {
+          for (const v of r.vulns) if (isRecord(v) && typeof v.id === "string") vulnIdsPerPkg[idx].push(v.id);
+        }
+        const token = str(r.next_page_token);
+        if (token) next.push({ idx, token });
+      });
+      if (results.length < pending.length) lastError = lastError || "incomplete response from OSV.dev";
+      pending = next;
+    }
+  };
+  const chunks: number[][] = [];
+  for (let i = 0; i < packages.length; i += BATCH_SIZE) chunks.push(packages.slice(i, i + BATCH_SIZE).map((_, j) => i + j));
+  await Promise.all(chunks.map((c) => queryChunk(c)));
+  vulnIdsPerPkg.forEach((ids, i) => (vulnIdsPerPkg[i] = Array.from(new Set(ids))));
 
-  if (failedChunks === chunks.length) {
+  if (unchecked.size) {
+    const failed = Array.from(unchecked).sort((a, b) => a - b).map((i) => packages[i]);
+    const all = unchecked.size === packages.length;
     findings.push({
       scanner: "dependencies",
-      ruleId: "osv-unavailable",
-      severity: "info",
-      title: "Dependency vulnerability lookup unavailable",
-      description: `${packages.length} package(s) were inventoried, but OSV.dev could not be reached (${lastError}). Known vulnerabilities in dependencies were therefore not assessed.`,
-      remediation: "Re-run the scan later, or run osv-scanner / pip-audit / npm audit in the build pipeline and attach the result.",
+      ruleId: all ? "osv-unavailable" : "osv-partial",
+      severity: "medium",
+      title: all
+        ? `Dependency vulnerabilities could not be checked (${packages.length} package${packages.length === 1 ? "" : "s"})`
+        : `Vulnerability check incomplete: ${failed.length} of ${packages.length} packages not checked`,
+      description: `The vulnerability database OSV.dev could not be queried (${lastError || "unknown error"}), so ${all ? "none of the dependencies" : `these packages: ${listPackages(failed)}`} could be checked for known vulnerabilities. This is not a clean result: ${all ? "they" : "these packages"} may still contain known vulnerabilities.`,
+      remediation: "Re-run the scan in a few minutes. If it keeps failing, run osv-scanner, npm audit or pip-audit locally or in your pipeline and attach the report to the submission.",
       refs: ["OWASP LLM03:2025"],
     });
-    return { findings, packages, status: "error", note: await withDepsDev([`OSV.dev unreachable: ${lastError}`]) };
+    notes.push(all ? `OSV.dev unreachable: ${lastError}.` : `${failed.length} of ${packages.length} package(s) could not be checked against OSV.dev (${lastError}).`);
+    if (all) {
+      const note = await withDepsDev();
+      return { findings, packages, status: "error", note: lastError === TIME_LIMIT ? `${STOPPED_EARLY} ${note ?? ""}`.trim() : note };
+    }
   }
 
   /* --- details per advisory --- */
@@ -586,7 +823,7 @@ export async function scanDependencies(archive: Archive): Promise<DependencyResu
     while (next < ids.length && deadline - Date.now() > 500) {
       const id = ids[next++];
       try {
-        const v = await fetchJson<OsvVuln>(`${OSV}/vulns/${encodeURIComponent(id)}`, { method: "GET" }, Math.min(VULN_TIMEOUT, deadline - Date.now()));
+        const v = await fetchJson<OsvVuln>(`${OSV}/vulns/${encodeURIComponent(id)}`, { method: "GET" }, Math.min(VULN_TIMEOUT, deadline - Date.now()), signal);
         if (v && typeof v.id === "string") details.set(id, v);
       } catch {
         /* advisory zonder details: valt terug op alleen het id */
@@ -637,18 +874,31 @@ export async function scanDependencies(archive: Archive): Promise<DependencyResu
       const summary = clip(cleanText(detail?.summary || (detail?.details ?? "").split(/\n\s*\n/)[0] || "Known vulnerability"), 110).replace(/\.$/, "");
       const shownId = cves[0] ?? primary;
       const aliasText = [...cves, ...others].filter((k) => k !== primary);
-      const body = detail?.details ? ` ${clip(cleanText(detail.details), 480)}` : detail ? "" : " Advisory details could not be retrieved within the scan budget; see the advisory for impact.";
+      const body = detail?.details
+        ? ` ${clip(cleanText(detail.details), 480)}`
+        : detail
+          ? ""
+          : " Advisory details could not be retrieved within the scan time, so the severity could not be determined and defaults to medium; open the advisory for the impact.";
       const file = byPath.get(pkg.source);
       const line = lineOf(file, pkg);
+      const approxText = pkg.approximate
+        ? ` No lockfile was found, so ${pkg.version} is the lowest version your manifest allows; the version actually installed may be newer and not affected.`
+        : "";
+      let remediation: string;
+      if (fixed) {
+        remediation = `${upgradeAdvice(pkg, fixed)}${pkg.approximate ? ` Also raise the minimum version in the manifest to ${fixed} and commit a lockfile so the installed version can be verified.` : ""} Then re-run the scan.`;
+      } else if (detail) {
+        remediation = `The advisory lists no fixed release of ${pkg.name} for this version. Check whether a newer major version or an alternative package avoids it, or apply the workaround described in ${shownId}; if neither is possible, document a risk acceptance for the reviewer.`;
+      } else {
+        remediation = `Open ${shownId} (https://osv.dev/vulnerability/${encodeURIComponent(primary)}) to find the fixed version, upgrade ${pkg.name} to it, and re-run the scan.`;
+      }
       findings.push({
         scanner: "dependencies",
         ruleId: primary,
         severity,
         title: `${pkg.name} ${pkg.version} — ${summary} (${shownId})`,
-        description: `${pkg.name}@${pkg.version} (${pkg.ecosystem}${pkg.approximate ? ", version inferred from a range in the manifest" : ""}) is affected by ${primary}${aliasText.length ? ` (${aliasText.slice(0, 6).join(", ")})` : ""}.${body}`,
-        remediation: fixed
-          ? `Upgrade ${pkg.name} to ${fixed} or later${pkg.approximate ? " and commit a lockfile so the resolved version is known" : ""}, then re-run the scan.`
-          : "No fixed version has been published; replace the package or apply the mitigations described in the advisory.",
+        description: `${pkg.name}@${pkg.version} (${pkg.ecosystem}) is affected by ${primary}${aliasText.length ? ` (${aliasText.slice(0, 6).join(", ")})` : ""}.${approxText}${body}`,
+        remediation,
         refs: [primary, ...cves.filter((c) => c !== primary), ...others.filter((o) => o.startsWith("GHSA-") || o.startsWith("PYSEC-")).slice(0, 3), ...Array.from(cwes)],
         file: pkg.source,
         line,
@@ -657,11 +907,13 @@ export async function scanDependencies(archive: Archive): Promise<DependencyResu
     }
   });
 
-  const notes: string[] = [];
-  if (failedChunks) notes.push(`${failedChunks} of ${chunks.length} OSV batch request(s) failed (${lastError}).`);
   const missing = uniqueIds.length - details.size;
-  if (missing > 0) notes.push(`Details for ${missing} advisor${missing === 1 ? "y" : "ies"} could not be retrieved; those findings use default severity.`);
-  return { findings, packages, status: failedChunks ? "error" : "ok", note: await withDepsDev(notes) };
+  if (missing > 0) notes.push(`Details for ${missing} advisor${missing === 1 ? "y" : "ies"} could not be retrieved; those findings use default severity (medium).`);
+  const detailsCut = next < ids.length || (signal.aborted && missing > 0);
+  const note = await withDepsDev();
+  const stopped = detailsCut || (await depsDevPromise).stoppedEarly;
+  const status = unchecked.size || stopped ? "error" : "ok";
+  return { findings, packages, status, note: stopped ? `${STOPPED_EARLY} ${note ?? ""}`.trim() : note };
 }
 
 /* ------------------------------------------- deps.dev (Open Source Insights) */
@@ -690,11 +942,13 @@ interface DepsDevInfo {
 interface DepsDevResult {
   info: Map<PackageRef, DepsDevInfo>;
   queried: number;
+  /** Gestopt door de scan-deadline voordat alle packages bevraagd waren. */
+  stoppedEarly: boolean;
 }
 
 /** Licenties en deprecation-status per package-versie bij deps.dev (lockfile-packages eerst). */
-async function queryDepsDev(packages: PackageRef[]): Promise<DepsDevResult> {
-  const deadline = Date.now() + DEPS_DEV_BUDGET_MS;
+async function queryDepsDev(packages: PackageRef[], scanDeadline: number, signal: AbortSignal): Promise<DepsDevResult> {
+  const deadline = Math.min(Date.now() + DEPS_DEV_BUDGET_MS, scanDeadline);
   const ordered = [...packages.filter((p) => !p.approximate), ...packages.filter((p) => p.approximate)].slice(0, DEPS_DEV_MAX);
   const info = new Map<PackageRef, DepsDevInfo>();
   let next = 0;
@@ -704,7 +958,7 @@ async function queryDepsDev(packages: PackageRef[]): Promise<DepsDevResult> {
       const version = pkg.ecosystem === "Go" && !/^v/.test(pkg.version) ? `v${pkg.version}` : pkg.version;
       const url = `${DEPS_DEV}/${DEPS_DEV_SYSTEM[pkg.ecosystem]}/packages/${encodeURIComponent(pkg.name)}/versions/${encodeURIComponent(version)}`;
       try {
-        const res = await fetchJson<unknown>(url, { method: "GET" }, Math.min(DEPS_DEV_TIMEOUT, deadline - Date.now()));
+        const res = await fetchJson<unknown>(url, { method: "GET" }, Math.min(DEPS_DEV_TIMEOUT, deadline - Date.now()), signal);
         if (!isRecord(res)) continue;
         const raw: unknown = res.licenses;
         const licenses = Array.isArray(raw) ? raw.filter((l): l is string => typeof l === "string" && l.trim() !== "").map((l) => l.trim()) : [];
@@ -717,7 +971,7 @@ async function queryDepsDev(packages: PackageRef[]): Promise<DepsDevResult> {
     }
   };
   await Promise.all(Array.from({ length: Math.min(DEPS_DEV_CONCURRENCY, ordered.length) }, () => worker()));
-  return { info, queried: ordered.length };
+  return { info, queried: ordered.length, stoppedEarly: signal.aborted || (next < ordered.length && Date.now() >= scanDeadline - 300) };
 }
 
 /** Sterke copyleft (GPL, AGPL, SSPL, EUPL, OSL); LGPL valt hier bewust buiten. */

@@ -73,6 +73,63 @@ const IAC_RULES: Rule[] = [
     appliesTo: isArm,
   },
   {
+    id: "iac-public-blob-container",
+    scanner: "config",
+    severity: "high",
+    title: "Storage container is publicly readable",
+    description: "The blob container allows anonymous read access. Anyone who knows or guesses the URL can list or download its files without signing in; for an AI application this is often the document set behind a RAG index or training data.",
+    remediation: "Set container_access_type = \"private\" (Terraform) or publicAccess: 'None' (Bicep/ARM), and give the application access through a managed identity with the Storage Blob Data Reader role.",
+    refs: ["Checkov CKV_AZURE_34", "CWE-284", "Azure Security Benchmark DP-2"],
+    extensions: IAC,
+    pattern: /\bcontainer_access_type\s*=\s*["'](?:blob|container)["']|\bpublicAccess["']?\s*:\s*["'](?:Blob|Container)["']/i,
+    appliesTo: isArm,
+  },
+  {
+    id: "iac-s3-public-acl",
+    scanner: "config",
+    severity: "high",
+    title: "S3 bucket or object is public",
+    description: "A public-read / public-read-write ACL makes the bucket contents readable (or writable) by anyone on the internet.",
+    remediation: "Remove the public ACL, enable S3 Block Public Access (block_public_acls, block_public_policy, ignore_public_acls, restrict_public_buckets = true) and serve content through signed URLs or CloudFront with origin access control.",
+    refs: ["Checkov CKV_AWS_20", "Checkov CKV_AWS_57", "CWE-284"],
+    extensions: [".tf", ".json", ".yaml", ".yml"],
+    pattern: /\bacl\s*=\s*["']public-read(?:-write)?["']|["']?(?:AccessControl|acl)["']?\s*:\s*["']?(?:PublicRead|PublicReadWrite|public-read(?:-write)?)\b/,
+  },
+  {
+    id: "k8s-host-namespace",
+    scanner: "config",
+    severity: "high",
+    title: "Pod shares the host's network, process or IPC namespace",
+    description: "hostNetwork, hostPID or hostIPC removes the isolation between the container and the node: the pod can see host processes, sniff or bind host network traffic, or read shared memory of other workloads.",
+    remediation: "Remove hostNetwork / hostPID / hostIPC (or set them to false). Expose the application through a Service and Ingress instead of host ports.",
+    refs: ["Checkov CKV_K8S_17", "Checkov CKV_K8S_18", "Checkov CKV_K8S_19", "CWE-250"],
+    extensions: [".yaml", ".yml"],
+    pattern: /^\s*-?\s*(?:hostNetwork|hostPID|hostIPC):\s*true\b/,
+  },
+  {
+    id: "k8s-hostpath-volume",
+    scanner: "config",
+    severity: "medium",
+    title: "Pod mounts a directory from the host (hostPath)",
+    description: "A hostPath volume gives the container direct access to the node's file system. A compromised container can read other workloads' data or credentials, or modify the node.",
+    remediation: "Use a PersistentVolumeClaim, ConfigMap, Secret or emptyDir instead. If host access is unavoidable, mount it readOnly: true and restrict the path as narrowly as possible.",
+    refs: ["Checkov CKV_K8S_27", "CWE-284"],
+    extensions: [".yaml", ".yml"],
+    pattern: /^\s*-?\s*hostPath:\s*(?:$|\{|#)/,
+  },
+  {
+    id: "container-docker-socket",
+    scanner: "config",
+    severity: "high",
+    title: "Docker socket mounted into a container",
+    description: "Mounting /var/run/docker.sock gives the container full control of the Docker daemon, which is equivalent to root access on the host: it can start privileged containers and read every other container's data.",
+    remediation: "Remove the docker.sock mount. If the application needs to build or run containers, use a dedicated build service (e.g. Azure Container Registry Tasks) or rootless tooling such as BuildKit/Kaniko.",
+    refs: ["Checkov CKV_K8S_27", "CWE-250", "CWE-284"],
+    extensions: [".yaml", ".yml"],
+    pattern: /\/var\/run\/docker\.sock|\/run\/containerd\/containerd\.sock/,
+    appliesTo: (f) => !/(?:^|\/)\.github\/workflows\//.test(f.path),
+  },
+  {
     id: "k8s-privileged-container",
     scanner: "config",
     severity: "high",
@@ -100,22 +157,30 @@ const IAC_RULES: Rule[] = [
 
 const ENV_FILE = /^\.env(?:\.[\w.-]+)?$|^[\w.-]+\.env$/i;
 const ENV_TEMPLATE = /\.(?:example|sample|template|tmpl|tpl|dist|defaults?|schema)$|^\.env\.(?:example|sample|template)/i;
+/** Variabelenamen die op een geheim wijzen. */
+const SECRET_NAME = /SECRET|PASSWORD|PASSWD|PWD|PASS\b|_PASS_|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|TOKEN|CREDENTIAL|CONN(?:ECTION)?_?STR|DSN|_KEY$|^KEY$|SAS\b/i;
+/** Namen die wel "token/key/secret" bevatten maar een verwijzing of instelling zijn, geen geheim. */
+const NON_SECRET_NAME = /_(?:URL|URI|ENDPOINT|PATH|FILE|DIR|NAME|ID|HEADER|TYPE|LENGTH|LEN|EXPIRY|EXPIRES|TTL|TIMEOUT|VERSION|ENABLED|REGION|HOST|PORT|LIMIT|COUNT|SIZE|VAULT)$|^MAX_|TOKENI[SZ]ER|MAX_?TOKENS?/i;
 
 function envFiles(archive: Archive): RawFinding[] {
   const out: RawFinding[] = [];
   for (const f of archive.files) {
     if (!ENV_FILE.test(f.name) || ENV_TEMPLATE.test(f.name)) continue;
-    const keys = splitLines(f.text ?? "")
-      .map((l) => /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\S/.exec(l))
-      .filter((m): m is RegExpExecArray => m !== null)
-      .map((m) => m[1]);
+    const pairs = splitLines(f.text ?? "")
+      .map((l) => /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?!["']{2}\s*$)(\S.*)$/.exec(l))
+      .filter((m): m is RegExpExecArray => m !== null);
+    const keys = pairs.map((m) => m[1]);
     if (f.text !== undefined && !keys.length) continue;
+    // Hoog als er iets geheim-achtigs in staat (of de inhoud onleesbaar is); anders alleen hygiëne
+    const sensitive =
+      f.text === undefined ||
+      pairs.some((m) => (SECRET_NAME.test(m[1]) && !NON_SECRET_NAME.test(m[1])) || /:\/\/[^/\s:@]+:[^@\s]+@/.test(m[2]));
     out.push({
       scanner: "config",
       ruleId: "committed-env-file",
-      severity: "high",
+      severity: sensitive ? "high" : "low",
       title: `Environment file committed (${f.name})`,
-      description: `${f.path} is part of the upload${keys.length ? ` and sets ${keys.length} variable(s): ${keys.slice(0, 10).join(", ")}${keys.length > 10 ? ", …" : ""}` : ""}. .env files hold environment-specific configuration and secrets and must never be distributed with the source.`,
+      description: `${f.path} is part of the upload${keys.length ? ` and sets ${keys.length} variable(s): ${keys.slice(0, 10).join(", ")}${keys.length > 10 ? ", …" : ""}` : ""}. .env files hold environment-specific configuration and secrets and must never be distributed with the source.${sensitive ? "" : " None of the variable names look like credentials, but the file should still not be shipped."}`,
       remediation: "Remove the file from the repository and its history, add .env* to .gitignore (keeping a .env.example without values), rotate any secrets it contained and provide configuration through App Service / Container Apps settings backed by Azure Key Vault references.",
       refs: ["CWE-538", "CWE-798"],
       file: f.path,
@@ -139,7 +204,8 @@ function instructions(text: string): Instruction[] {
   let start = 0;
   splitLines(text).forEach((l, i) => {
     const t = l.trim();
-    if (!buf && (t === "" || t.startsWith("#"))) return;
+    // Commentaar- en lege regels mogen ook midden in een vervolgregel (\) staan
+    if (t === "" || t.startsWith("#")) return;
     if (!buf) start = i + 1;
     if (t.endsWith("\\")) {
       buf += `${t.slice(0, -1)} `;
@@ -153,22 +219,43 @@ function instructions(text: string): Instruction[] {
   return out;
 }
 
-function dockerfile(f: SourceFile): RawFinding[] {
+/** COPY . /app (of ./) neemt de hele build-context mee; COPY --from=<stage> niet. */
+function copiesWholeContext(args: string): boolean {
+  if (/--from=/i.test(args)) return false;
+  const srcs = args.split(/\s+/).filter((t) => t && !t.startsWith("--")).slice(0, -1);
+  return srcs.some((s) => s === "." || s === "./");
+}
+
+function dockerfile(f: SourceFile, hasDockerignore: boolean): RawFinding[] {
   const out: RawFinding[] = [];
   const base = { scanner: "config" as const, file: f.path };
   const ins = instructions(f.text ?? "");
   const stages = new Set<string>();
+  /** Laatste USER per stage, zodat FROM <stage> de gebruiker van die stage erft. */
+  const stageUser = new Map<string, Instruction | null>();
+  const stageImage = new Map<string, string>();
+  let stageName = "";
   let finalFrom: { ins: Instruction; image: string } | null = null;
   let user: Instruction | null = null;
+  let copyAll: Instruction | null = null;
 
   for (const it of ins) {
     if (it.keyword === "FROM") {
+      if (stageName) stageUser.set(stageName, user);
       const parts = it.args.split(/\s+/).filter((t) => !t.startsWith("--"));
       const image = parts[0] ?? "";
-      if (parts[1]?.toLowerCase() === "as" && parts[2]) stages.add(parts[2].toLowerCase());
-      finalFrom = { ins: it, image };
-      user = null;
-      if (!image || image === "scratch" || stages.has(image.toLowerCase()) || image.includes("$")) continue;
+      stageName = parts[1]?.toLowerCase() === "as" && parts[2] ? parts[2].toLowerCase() : "";
+      const parent = image.toLowerCase();
+      const isStage = stages.has(parent);
+      // FROM <stage> erft basis-image en USER van die stage
+      const baseImage = isStage ? (stageImage.get(parent) ?? image) : image;
+      finalFrom = { ins: it, image: baseImage };
+      user = isStage ? (stageUser.get(parent) ?? null) : null;
+      if (stageName) {
+        stages.add(stageName);
+        stageImage.set(stageName, baseImage);
+      }
+      if (!image || image === "scratch" || isStage || image.includes("$")) continue;
       const lastSeg = image.split("@")[0].split("/").pop() ?? "";
       const tag = lastSeg.includes(":") ? lastSeg.slice(lastSeg.indexOf(":") + 1) : "";
       if (!image.includes("@") && (!tag || tag === "latest")) {
@@ -186,6 +273,8 @@ function dockerfile(f: SourceFile): RawFinding[] {
       }
     } else if (it.keyword === "USER") {
       user = it;
+    } else if ((it.keyword === "COPY" || it.keyword === "ADD") && !copyAll && copiesWholeContext(it.args)) {
+      copyAll = it;
     } else if (it.keyword === "RUN" && /\b(?:curl|wget)\b[^|]*\|\s*(?:sudo\s+)?(?:ba|z|da|k)?sh\b/.test(it.args)) {
       out.push({
         ...base,
@@ -211,8 +300,23 @@ function dockerfile(f: SourceFile): RawFinding[] {
         snippet: snippetOf(it.raw),
       });
     } else if (it.keyword === "ENV" || it.keyword === "ARG") {
-      const m = /^([A-Za-z0-9_]*(?:SECRET|PASSWORD|PASSWD|PWD|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|TOKEN|CREDENTIALS?)[A-Za-z0-9_]*)(?:\s*=\s*|\s+)["']?([^\s"']+)/i.exec(it.args);
-      if (m && m[2] && !/^\$/.test(m[2]) && m[2].length >= 4) {
+      // ENV A=1 B=2 (meerdere paren) en de oude vorm ENV KEY value
+      const pairs: [string, string][] = [];
+      for (const p of it.args.matchAll(/(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|'[^']*'|\S+)/g)) pairs.push([p[1], p[2].replace(/^["']|["']$/g, "")]);
+      if (!pairs.length) {
+        const legacy = /^([A-Za-z_][A-Za-z0-9_]*)\s+["']?([^\s"']+)/.exec(it.args);
+        if (legacy) pairs.push([legacy[1], legacy[2]]);
+      }
+      const hit = pairs.find(
+        ([k, v]) =>
+          /SECRET|PASSWORD|PASSWD|PWD|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|TOKEN|CREDENTIALS?/i.test(k) &&
+          !NON_SECRET_NAME.test(k) &&
+          v.length >= 4 &&
+          !/^\$/.test(v) &&
+          !/^(?:true|false|none|null|changeme|placeholder|dummy|x+)$/i.test(v),
+      );
+      const m = hit ? [hit[0], hit[0], hit[1]] : null;
+      if (m) {
         out.push({
           ...base,
           ruleId: "docker-secret-in-env",
@@ -244,6 +348,20 @@ function dockerfile(f: SourceFile): RawFinding[] {
       });
     }
   }
+
+  if (copyAll && !hasDockerignore) {
+    out.push({
+      ...base,
+      ruleId: "docker-copy-all-no-dockerignore",
+      severity: "low",
+      title: "Whole project folder copied into the image without a .dockerignore",
+      description: "COPY . copies everything in the build context into the image, and there is no .dockerignore to exclude anything. Local .env files, .git history, credentials, notebooks with outputs and test data then end up in the image, where anyone who can pull it can read them.",
+      remediation: "Add a .dockerignore next to the Dockerfile that excludes at least .env*, .git, *.pem, *.key, __pycache__, node_modules, data/ and notebooks, or copy only the folders the application needs (COPY src/ /app/src/).",
+      refs: ["CWE-538", "Docker build best practices: .dockerignore"],
+      line: copyAll.line,
+      snippet: snippetOf(copyAll.raw),
+    });
+  }
   return out;
 }
 
@@ -251,22 +369,45 @@ function dockerfile(f: SourceFile): RawFinding[] {
 
 const OPEN_SOURCE = /\bsource_address_prefix(?:es)?\s*=\s*\[?\s*["'](?:\*|0\.0\.0\.0\/0|Internet|Any)["']|\bsourceAddressPrefix["']?\s*:\s*["'](?:\*|0\.0\.0\.0\/0|Internet)["']|\bcidr_blocks\s*=\s*\[\s*["']0\.0\.0\.0\/0["']|\bstart_ip_address\s*=\s*["']0\.0\.0\.0["']|\bstartIpAddress["']?\s*:\s*["']0\.0\.0\.0["']/i;
 
+/** De dichtstbijzijnde regel (binnen `radius`) die `re` matcht; bij gelijke afstand wint de regel erboven. */
+function nearest(lines: string[], i: number, re: RegExp, radius: number): RegExpExecArray | null {
+  for (let d = 0; d <= radius; d++) {
+    for (const j of d === 0 ? [i] : [i - d, i + d]) {
+      if (j < 0 || j >= lines.length) continue;
+      const m = re.exec(lines[j]);
+      if (m) return m;
+    }
+  }
+  return null;
+}
+
+const ADMIN_PORT = /\b(?:destination_?port_?ranges?|destinationPortRanges?|from_port|to_port|port)["']?\s*[:=]\s*\[?\s*["']?(22|3389|\*|0-65535)(?![\d-])["']?/i;
+
 function openInbound(f: SourceFile): RawFinding[] {
   const out: RawFinding[] = [];
   const lines = splitLines(f.text ?? "");
   lines.forEach((l, i) => {
     if (COMMENT_LINE.test(l) || !OPEN_SOURCE.test(l)) return;
     const window = lines.slice(Math.max(0, i - 15), i + 15).join("\n");
-    if (/\b(?:Outbound|egress)\b/i.test(window) && !/\b(?:Inbound|ingress)\b/i.test(window)) return;
+    // Richting en actie van díe regel (de dichtstbijzijnde), niet van een buurregel in hetzelfde bestand
+    const direction = nearest(lines, i, /\b(Inbound|Outbound|ingress|egress)\b/i, 15);
+    if (direction && /^(?:outbound|egress)$/i.test(direction[1])) return;
+    const access = nearest(lines, i, /\baccess["']?\s*[:=]\s*["'](Allow|Deny)["']/i, 12);
+    if (access && /^deny$/i.test(access[1])) return; // een deny-all-regel is juist goed
     // start_ip 0.0.0.0 + end_ip 0.0.0.0 is de "Allow Azure services"-regel, geen open internet
     if (/start_?ip_?address/i.test(l) && !/255\.255\.255\.255/.test(window)) return;
+    const port = nearest(lines, i, ADMIN_PORT, 12);
+    const admin = port !== null && port[1] !== undefined;
+    const portLabel = port ? (port[1] === "22" ? "SSH (22)" : port[1] === "3389" ? "RDP (3389)" : "all ports") : "";
     out.push({
       scanner: "config",
       ruleId: "iac-open-inbound",
-      severity: "medium",
-      title: "Inbound access open to the internet",
-      description: "A network or firewall rule accepts inbound traffic from any source address (*, 0.0.0.0/0 or Internet).",
-      remediation: "Restrict the source to known address ranges or service tags, and prefer private endpoints / VNet integration over public ingress.",
+      severity: admin ? "high" : "medium",
+      title: admin ? `Inbound ${portLabel} open to the internet` : "Inbound access open to the internet",
+      description: `A network or firewall rule accepts inbound traffic from any source address (*, 0.0.0.0/0 or Internet)${admin ? ` on ${portLabel}. Internet-exposed management ports and any-port rules are scanned and brute-forced continuously` : ""}.`,
+      remediation: admin
+        ? "Remove the rule or restrict the source to known address ranges. For administration use Azure Bastion, Just-In-Time VM access or a VPN instead of opening SSH/RDP to the internet."
+        : "Restrict the source to known address ranges or service tags, and prefer private endpoints / VNet integration over public ingress.",
       refs: ["Checkov CKV_AZURE_9", "Checkov CKV_AZURE_160", "CWE-284"],
       file: f.path,
       line: i + 1,
@@ -278,52 +419,119 @@ function openInbound(f: SourceFile): RawFinding[] {
 
 /* --------------------------------------------------------- GitHub Actions */
 
-const UNTRUSTED_CONTEXT = /\$\{\{\s*(github\.event\.(?:issue\.(?:title|body)|pull_request\.(?:title|body|head\.ref|head\.label)|comment\.body|review\.body|review_comment\.body|discussion\.(?:title|body)|head_commit\.message|commits\[\d+\]\.message|pages\[\d+\]\.page_name)|github\.head_ref)\s*\}\}/;
+const UNTRUSTED_CONTEXT = /\$\{\{\s*(github\.event\.(?:issue\.(?:title|body)|pull_request\.(?:title|body|head\.ref|head\.label|head\.repo\.(?:description|homepage))|comment\.body|review\.body|review_comment\.body|discussion\.(?:title|body)|head_commit\.(?:message|author\.(?:name|email))|commits\[\d+\]\.(?:message|author\.(?:name|email))|pages\[\d+\]\.page_name|workflow_run\.(?:head_branch|head_commit\.message|head_commit\.author\.(?:name|email)|display_title))|github\.head_ref)\s*\}\}/;
+
+/** Checkout van de PR-code (head) in plaats van de basis-branch. */
+const PR_HEAD_REF = /\$\{\{\s*(?:github\.event\.pull_request\.head\.(?:sha|ref)|github\.head_ref)\s*\}\}|refs\/pull\//;
+
+const PULL_REQUEST_TARGET = /^\s*(?:-\s*)?["']?pull_request_target["']?\s*:?\s*(?:#.*)?$|^\s*on:\s*\[?[^\n#]*\bpull_request_target\b/;
 
 function workflow(f: SourceFile): RawFinding[] {
   const out: RawFinding[] = [];
   const lines = splitLines(f.text ?? "");
+  const base = { scanner: "config" as const, file: f.path };
   let runIndent = -1;
+  let prtLine = -1;
+  const unpinned: { line: number; action: string }[] = [];
   lines.forEach((l, i) => {
+    if (COMMENT_LINE.test(l)) return;
     const indent = l.length - l.trimStart().length;
     if (runIndent >= 0 && l.trim() !== "" && indent <= runIndent) runIndent = -1;
-    const run = /^(\s*)(?:-\s+)?run:\s*(.*)$/.exec(l);
+    // run: (shell) en script: (actions/github-script, ssh-actions …) voeren de tekst uit
+    const run = /^(\s*)(?:-\s+)?(?:run|script):\s*(.*)$/.exec(l);
     let inRun = runIndent >= 0;
     if (run) {
       const rest = run[2].trim();
-      if (rest === "|" || rest === ">" || rest.startsWith("|") || rest.startsWith(">")) runIndent = indent;
+      if (rest.startsWith("|") || rest.startsWith(">")) runIndent = indent;
       else inRun = true;
     }
-    if (/^\s*pull_request_target\s*:?/.test(l) || /^\s*on:\s*\[?[^\n]*\bpull_request_target\b/.test(l)) {
+    if (prtLine < 0 && PULL_REQUEST_TARGET.test(l)) prtLine = i;
+
+    const uses = /^\s*(?:-\s+)?uses:\s*["']?([^\s"'#]+)/.exec(l);
+    if (uses) {
+      const ref = uses[1];
+      const at = ref.lastIndexOf("@");
+      const owner = ref.split("/")[0].toLowerCase();
+      const firstParty = owner === "actions" || owner === "github";
+      if (!ref.startsWith("./") && !ref.startsWith("docker://") && !firstParty && (at < 0 || !/^[0-9a-f]{40}$/i.test(ref.slice(at + 1)))) {
+        unpinned.push({ line: i + 1, action: ref });
+      }
+    }
+
+    if (/^\s*permissions:\s*["']?write-all["']?\s*(?:#.*)?$/.test(l)) {
       out.push({
-        scanner: "config",
-        ruleId: "gha-pull-request-target",
+        ...base,
+        ruleId: "gha-write-all-permissions",
         severity: "medium",
-        title: "Workflow triggered by pull_request_target",
-        description: "pull_request_target runs with the base repository's secrets and a write token even for pull requests from forks. Checking out or executing the PR's code in such a workflow lets any external contributor steal secrets or push to the repository.",
-        remediation: "Use the pull_request trigger for untrusted code. If pull_request_target is needed, never check out or run the PR head, and limit permissions: to read-only.",
-        refs: ["CWE-829", "GitHub Security Lab: preventing pwn requests"],
-        file: f.path,
+        title: "Workflow token has write access to everything",
+        description: "permissions: write-all gives the GITHUB_TOKEN write access to code, packages, releases and settings of the repository. Any compromised step or action can then push code or publish packages.",
+        remediation: "Replace write-all with the minimum needed, e.g. permissions: contents: read, and grant extra scopes (such as pull-requests: write) only to the job that needs them.",
+        refs: ["CWE-250", "OpenSSF Scorecard: Token-Permissions"],
         line: i + 1,
         snippet: snippetOf(l),
       });
     }
+
     const m = inRun ? UNTRUSTED_CONTEXT.exec(l) : null;
     if (m) {
       out.push({
-        scanner: "config",
+        ...base,
         ruleId: "gha-script-injection",
         severity: "high",
         title: `Script injection via ${m[1]}`,
-        description: `An attacker-controlled value (${m[1]}) is expanded directly into a run: script. A crafted issue or PR title such as \`"; curl … | sh; #\` executes commands in the runner with access to its secrets and token.`,
-        remediation: "Pass the value through an environment variable (env: TITLE: ${{ … }}) and reference it as \"$TITLE\" in the script, so it is treated as data.",
+        description: `An attacker-controlled value (${m[1]}) is pasted directly into a script that the workflow runs. A crafted issue or PR title such as \`"; curl … | sh; #\` then executes commands on the runner, with access to its secrets and token.`,
+        remediation: "Pass the value through an environment variable (env: TITLE: ${{ … }}) and reference it as \"$TITLE\" in the script (process.env.TITLE in github-script), so it is treated as data instead of code.",
         refs: ["CWE-78", "CWE-94", "GitHub Security Lab: untrusted input"],
-        file: f.path,
         line: i + 1,
         snippet: snippetOf(l),
       });
     }
   });
+
+  if (prtLine >= 0) {
+    // pull_request_target + checkout van de PR-head = "pwn request": fork-code draait met secrets en schrijf-token
+    const headIdx = lines.findIndex((l) => !COMMENT_LINE.test(l) && /^\s*(?:-\s+)?ref:/.test(l) && PR_HEAD_REF.test(l));
+    if (headIdx >= 0) {
+      out.push({
+        ...base,
+        ruleId: "gha-pwn-request",
+        severity: "high",
+        title: "pull_request_target workflow checks out untrusted pull request code",
+        description: "This workflow runs on pull_request_target, which has access to the repository's secrets and a write token, and it checks out the code from the pull request. Anyone can open a pull request from a fork, so their code (build scripts, package.json scripts, tests) runs with your secrets and can push to the repository.",
+        remediation: "Switch to the pull_request trigger for building or testing PR code. If pull_request_target is required (e.g. to label or comment), do not check out the PR head, or split it into a pull_request workflow that builds without secrets and a workflow_run workflow that only consumes its results.",
+        refs: ["CWE-829", "GitHub Security Lab: preventing pwn requests"],
+        line: headIdx + 1,
+        snippet: snippetOf(lines[headIdx]),
+      });
+    } else {
+      out.push({
+        ...base,
+        ruleId: "gha-pull-request-target",
+        severity: "low",
+        title: "Workflow triggered by pull_request_target",
+        description: "pull_request_target runs with the base repository's secrets and a write token, even for pull requests from forks. No checkout of the pull request code was found, but any later change that checks out or runs PR code would expose those secrets.",
+        remediation: "Use the pull_request trigger unless the workflow really needs secrets or write access. Keep permissions: read-only and never check out or execute the PR head in this workflow.",
+        refs: ["CWE-829", "GitHub Security Lab: preventing pwn requests"],
+        line: prtLine + 1,
+        snippet: snippetOf(lines[prtLine]),
+      });
+    }
+  }
+
+  if (unpinned.length) {
+    const names = Array.from(new Set(unpinned.map((u) => u.action)));
+    out.push({
+      ...base,
+      ruleId: "gha-unpinned-action",
+      severity: "low",
+      title: `Third-party actions not pinned to a commit (${names.length})`,
+      description: `${names.slice(0, 8).join(", ")}${names.length > 8 ? ` and ${names.length - 8} more` : ""} ${names.length === 1 ? "is" : "are"} referenced by a tag or branch. Tags can be moved by the action's owner or by an attacker who compromises it (as happened with tj-actions/changed-files in 2025), and the new code then runs in your workflow with its secrets.`,
+      remediation: "Pin each third-party action to a full 40-character commit SHA (uses: owner/action@<sha> # v1.2.3) and let Dependabot or Renovate propose updates.",
+      refs: ["CWE-829", "OpenSSF Scorecard: Pinned-Dependencies", "OWASP LLM03:2025"],
+      line: unpinned[0].line,
+      snippet: snippetOf(lines[unpinned[0].line - 1] ?? ""),
+    });
+  }
   return out;
 }
 
@@ -372,9 +580,12 @@ function hygiene(archive: Archive): RawFinding[] {
 
 export function scanConfig(archive: Archive): ScannerResult {
   const findings: RawFinding[] = [...envFiles(archive), ...runRules(archive.files, IAC_RULES)];
+  const paths = new Set(archive.files.map((f) => f.path));
+  const dockerignore = (f: SourceFile) =>
+    paths.has(".dockerignore") || paths.has(f.dir ? `${f.dir}/.dockerignore` : ".dockerignore") || paths.has(`${f.path}.dockerignore`);
   for (const f of archive.files) {
     if (f.text === undefined) continue;
-    if (isDockerfile(f.name)) findings.push(...dockerfile(f));
+    if (isDockerfile(f.name)) findings.push(...dockerfile(f, dockerignore(f)));
     if (IAC.includes(f.ext) && isArm(f)) findings.push(...openInbound(f));
     if (/(?:^|\/)\.github\/workflows\/[^/]+\.ya?ml$/i.test(f.path)) findings.push(...workflow(f));
   }

@@ -35,25 +35,29 @@ const SCANNERS: { name: string; checks: string; basis: string; impact: string }[
   },
   {
     name: "Static analysis",
-    checks: "Code and command injection, insecure deserialisation, SQL built from strings, disabled TLS verification, weak hashing, permissive CORS, debug mode.",
+    checks:
+      "Code and command injection, insecure deserialisation, SQL built from strings, cross-site scripting via innerHTML, disabled TLS verification, weak hashing, permissive CORS, debug mode, insecure temporary files.",
     basis: "Semgrep- and Bandit-derived patterns for Python, JavaScript and TypeScript",
     impact: "By severity",
   },
   {
     name: "AI / LLM rules",
-    checks: "LLM output passed to exec, shell or SQL; user input concatenated into prompts; credentials in system prompts; unpinned or remote-code models; prompts written to logs; missing token limits.",
+    checks:
+      "LLM output passed to exec, shell or SQL; agents with code-execution tools; disabled LangChain safety flags; user input concatenated into prompts; credentials in system prompts; public AI APIs instead of tenant-hosted models; unpinned or remote-code models; public Gradio share links; prompts written to logs; missing token limits and guardrails.",
     basis: "OWASP Top 10 for LLM Applications 2025 · MITRE ATLAS",
     impact: "By severity",
   },
   {
     name: "Model artefacts",
-    checks: "Pickle-based weights (.pkl, .pt, .bin, .joblib) inspected for opcodes that import or call code on load.",
-    basis: "ModelScan-style pickle opcode analysis",
+    checks:
+      "Pickle-based weights (.pkl, .pt, .bin, .joblib) inspected for opcodes that import or call code on load; Keras models with Lambda layers; NumPy files with object arrays. Model files that cannot be inspected are listed.",
+    basis: "ModelScan-style analysis of pickle, Keras and NumPy files",
     impact: "Blocking when executable code is found",
   },
   {
     name: "Configuration & IaC",
-    checks: "Dockerfiles, Kubernetes manifests and Terraform / Bicep for root containers, unpinned images, public exposure and missing encryption.",
+    checks:
+      "Dockerfiles, Kubernetes manifests, Terraform / Bicep and GitHub Actions workflows: root or privileged containers, unpinned images, secrets baked into images, public network access, weak TLS, risky workflow triggers. Also committed .env files and a missing README, LICENSE or SECURITY.md.",
     basis: "Hadolint- and Checkov-derived rules",
     impact: "By severity",
   },
@@ -131,7 +135,10 @@ const OWASP: { id: string; name: string; desc: string; cov: Cov }[] = [
 const FRAMEWORKS: { name: string; use: string }[] = [
   { name: "NIST AI RMF 1.0", use: "Ownership, intended use, monitoring and incident response (GOVERN, MAP, MEASURE, MANAGE)." },
   { name: "ISO/IEC 42001", use: "AI management system controls: documentation, system cards, responsible AI review." },
-  { name: "EU AI Act", use: "Risk tier: prohibited practices (Art. 5), high-risk use cases (Annex III), transparency (Art. 50), human oversight (Art. 14)." },
+  {
+    name: "EU AI Act",
+    use: "Risk tier: prohibited practices (Art. 5, e.g. social scoring, emotion recognition at work, biometric categorisation by sensitive traits, untargeted face scraping, predictive policing), high-risk use cases (Annex III, e.g. HR, education, credit, critical infrastructure, law enforcement), transparency (Art. 50), human oversight (Art. 14).",
+  },
   { name: "GDPR", use: "Personal and special-category data, DPIA (Art. 35), automated decisions (Art. 22), international transfers (Chapter V)." },
   { name: "MITRE ATLAS", use: "Adversarial techniques against AI systems: prompt injection, model supply-chain compromise, data extraction." },
   { name: "OWASP LLM Top 10 / AI Exchange", use: "Architecture, agency and guardrail questions for LLM-based assets." },
@@ -142,12 +149,15 @@ const BLOCKING = [
   { label: "No unsafe model artefacts", detail: "No model file that executes code when loaded." },
   { label: "No critical findings", detail: "Across code, dependencies, configuration and questionnaire." },
   { label: "No prohibited AI practice", detail: "Use case does not fall under EU AI Act Art. 5." },
+  { label: "Something could be scanned", detail: "An upload without any scannable source, manifest or model file cannot be assessed." },
 ];
 
 const NON_BLOCKING = [
   { label: "No high-severity findings", detail: "High findings need remediation or a documented risk acceptance." },
   { label: `Trust score ≥ ${PASS_SCORE}`, detail: "Below the threshold the asset is routed to manual review." },
   { label: "Not a high-risk AI system", detail: "Annex III use cases require AI governance board approval." },
+  { label: "Scan completed fully", detail: "A scanner that failed or timed out, a truncated archive or mostly unread files mean a reviewer must assess the gap." },
+  { label: "No self-declared exceptions for serious findings", detail: "Critical or high findings waived via .aigateignore or an inline comment must be confirmed by a reviewer." },
 ];
 
 const WEIGHTS = [
@@ -209,7 +219,7 @@ export default function MethodologyPage() {
           <Section
             id="scanners"
             title="Automated scanners"
-            description="Every upload or repository snapshot is extracted in memory and analysed by the scanners below. Nothing is executed. Findings carry a severity, location, remediation and references."
+            description="Every upload or repository snapshot is extracted in memory and analysed by the scanners below. Nothing is executed. Upload a .zip archive or a single source file; other archive formats (.tar.gz, .7z, .rar) cannot be unpacked. Folders such as node_modules, .venv, dist and build are skipped. Findings carry a severity, location, remediation and references."
           >
             <TableScroll label="Scanners">
               <table className="w-full min-w-[760px] text-[13px]">
@@ -340,7 +350,10 @@ export default function MethodologyPage() {
                   k: "How",
                   v: "The server downloads a snapshot archive of that version from the host over https. Nothing is cloned, no Git hooks run, submodules are not included and no code is executed.",
                 },
-                { k: "Limits", v: "The same size limit as uploads applies. The snapshot is scanned exactly like an uploaded archive and kept with the submission." },
+                {
+                  k: "Limits",
+                  v: "Snapshots larger than 50 MB are rejected and the download must finish within about 25 seconds. The snapshot is scanned exactly like an uploaded archive and kept with the submission.",
+                },
               ].map((row) => (
                 <div key={row.k} className="grid gap-1 px-4 py-3 sm:grid-cols-[160px_minmax(0,1fr)] sm:gap-6 sm:px-5">
                   <dt className="text-[13px] font-medium text-ink">{row.k}</dt>
@@ -494,7 +507,8 @@ export default function MethodologyPage() {
                   <code className="font-mono text-xs">nosec</code>, <code className="font-mono text-xs">nosemgrep</code>,{" "}
                   <code className="font-mono text-xs">gitleaks:allow</code>, <code className="font-mono text-xs">aigate:ignore</code>). Findings in test,
                   example and demo code are treated the same way, except secrets. Suppressed findings stay visible as info, with the reason, so the reviewer
-                  can challenge them.
+                  can challenge them. Blocking findings (critical findings and exposed credentials) cannot be waived this way, and catch-all patterns such
+                  as <code className="font-mono text-xs">*</code> are ignored.
                 </p>
               </div>
             </div>
